@@ -70,13 +70,27 @@ from utils.logger import (
     help="Emit structured JSON logs instead of coloured text.",
 )
 @click.option(
+    "--backend",
+    "-b",
+    default=None,
+    type=click.Choice(["auto", "fastapi", "triton", "seldon", "vertex_ai"],
+                       case_sensitive=False),
+    help="Force a specific backend (overrides config). auto = let AI decide.",
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
     default=False,
     help="Enable verbose (DEBUG) logging.",
 )
-def main(config_path: str, dry_run: bool, json_logs: bool, verbose: bool) -> None:
+def main(
+    config_path: str,
+    dry_run: bool,
+    json_logs: bool,
+    backend: str | None,
+    verbose: bool,
+) -> None:
     """LaunchML — Analyze, reason, and deploy ML models with AI."""
 
     # ── 0. Setup ──────────────────────────────────────────────────────────
@@ -95,8 +109,19 @@ def main(config_path: str, dry_run: bool, json_logs: bool, verbose: bool) -> Non
     step("Loading configuration")
     from core.config_loader import load_config
     config = load_config(config_path)
+
+    # CLI --backend flag overrides YAML config
+    if backend and backend.lower() != "auto":
+        # Pydantic model is frozen, so we rebuild with the override
+        config_dict = config.model_dump()
+        config_dict["deployment"]["backend"] = backend.lower()
+        from core.config_loader import DeployConfig
+        config = DeployConfig(**config_dict)
+        info(f"Backend override (CLI): {backend}")
+
     deploy_mode = "LOCAL (Docker)" if config.deployment.is_local else f"CLOUD ({config.deployment.cloud})"
-    info(f"Deploy mode: {deploy_mode}  |  Region: {config.deployment.region}")
+    backend_info = f"  |  Backend: {config.deployment.backend}" if config.deployment.has_backend_override else ""
+    info(f"Deploy mode: {deploy_mode}  |  Region: {config.deployment.region}{backend_info}")
     info(f"LLM: {config.llm.provider}/{config.llm.model}")
 
     # ── 2. Run pipeline ───────────────────────────────────────────────────
@@ -143,8 +168,12 @@ def _print_results(state: dict, elapsed: float, dry_run: bool) -> None:
     is_local = config_dict.get("deployment", {}).get("cloud") == "local"
 
     deploy_mode = "🏠 Local (Docker)" if is_local else "☁️ Cloud"
+    forced = config_dict.get("deployment", {}).get("backend")
+    backend_label = decision.get('selected_backend', 'N/A')
+    if forced:
+        backend_label += "  [dim](user override)[/dim]"
     console.print(f"  [cyan]Mode:[/cyan]           {deploy_mode}")
-    console.print(f"  [cyan]Backend:[/cyan]        {decision.get('selected_backend', 'N/A')}")
+    console.print(f"  [cyan]Backend:[/cyan]        {backend_label}")
     console.print(f"  [cyan]Instance:[/cyan]       {decision.get('instance_type', 'N/A')}")
     console.print(f"  [cyan]GPU:[/cyan]            {decision.get('gpu_type', 'none')}")
     console.print(f"  [cyan]Scaling:[/cyan]        {decision.get('scaling_strategy', 'N/A')}")
@@ -159,6 +188,14 @@ def _print_results(state: dict, elapsed: float, dry_run: bool) -> None:
             stop_cmd = deploy.get("stop_command", "")
             if stop_cmd:
                 console.print(f"  [yellow]Stop:[/yellow]           {stop_cmd}")
+        # Display sample curl command
+        sample_curl = deploy.get("sample_curl", "")
+        if sample_curl:
+            console.print()
+            console.print("  [bold cyan]📋 Sample Request:[/bold cyan]")
+            console.print()
+            for line in sample_curl.split("\n"):
+                console.print(f"    [dim]{line}[/dim]")
     else:
         console.print("  [yellow](dry-run mode — deployment skipped)[/yellow]")
 

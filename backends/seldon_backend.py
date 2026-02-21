@@ -85,13 +85,41 @@ class SeldonBackend(DeploymentBackend):
         log.info("seldon_terraform_generated", files=written)
         return files
 
+    def _build_sample_curl(self, host: str = "localhost:5000") -> str:
+        """Build a sample curl for the Seldon V1 prediction API."""
+        props = self.config.api.request_schema.properties
+        example: dict[str, Any] = {}
+        for name, prop_def in (props or {}).items():
+            jtype = prop_def.get("type", "string") if isinstance(prop_def, dict) else "string"
+            name_lower = name.lower()
+            if "url" in name_lower or "image" in name_lower:
+                example[name] = "https://example.com/image.jpg"
+            elif "text" in name_lower:
+                example[name] = "Hello, world!"
+            elif jtype == "number":
+                example[name] = 1.0
+            elif jtype == "integer":
+                example[name] = 1
+            else:
+                example[name] = f"example_{name}"
+
+        # Seldon V1 wraps data in {"data": {"ndarray": [[...]]}} or as JSON
+        body = json.dumps({"data": {"ndarray": [[1.0, 2.0, 3.0]]}})
+        return (
+            f"curl -X POST http://{host}/predict \\\n"
+            f"  -H \"Content-Type: application/json\" \\\n"
+            f"  -d '{body}'"
+        )
+
     def deploy(self) -> Dict[str, Any]:
         log.info("seldon_deploy_start")
+        host = f"ml-seldon-{self.config.deployment.region}.example.com"
         return {
             "status": "deployed",
-            "endpoint_url": f"https://ml-seldon-{self.config.deployment.region}.example.com/seldon/default/ml-model/api/v1.0/predictions",
-            "health_url": f"https://ml-seldon-{self.config.deployment.region}.example.com/seldon/default/ml-model/api/v1.0/health/status",
+            "endpoint_url": f"https://{host}/seldon/default/ml-model/api/v1.0/predictions",
+            "health_url": f"https://{host}/seldon/default/ml-model/api/v1.0/health/status",
             "backend": self.name,
+            "sample_curl": self._build_sample_curl(host),
         }
 
     def setup_observability(self) -> Dict[str, str]:
@@ -187,6 +215,7 @@ class SeldonBackend(DeploymentBackend):
                 "monitoring_url": "http://localhost:6000/prometheus",
                 "backend": self.name,
                 "stop_command": f"cd {compose_dir} && {' '.join(docker_cmd)} down",
+                "sample_curl": self._build_sample_curl(),
             }
         except subprocess.TimeoutExpired:
             log.error("seldon_local_timeout")
@@ -591,8 +620,7 @@ services:
             return ["docker-compose"]
         return None
 
-    @staticmethod
-    def _simulate_local_deploy() -> Dict[str, Any]:
+    def _simulate_local_deploy(self) -> Dict[str, Any]:
         """Return a simulated result when Docker is not available."""
         return {
             "status": "simulated_local",
@@ -601,4 +629,5 @@ services:
             "monitoring_url": "http://localhost:6000/prometheus",
             "backend": "seldon",
             "note": "Docker not available — simulated. Install Docker to deploy locally.",
+            "sample_curl": self._build_sample_curl(),
         }

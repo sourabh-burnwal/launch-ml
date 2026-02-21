@@ -120,9 +120,13 @@ def node_model_analyzer(state: PipelineState) -> PipelineState:
 
 
 def node_strategy_agent(state: PipelineState) -> PipelineState:
-    """Node 2: Use LLM to reason about the best deployment backend."""
-    step("Node 2 — Strategy Agent reasoning about deployment backend")
+    """Node 2: Use LLM to reason about the best deployment backend.
 
+    When the user sets ``deployment.backend`` in the config (to anything
+    other than ``auto``), the LLM is **skipped entirely** and the
+    chosen backend is used directly.  This is faster, deterministic,
+    and gives the user full control.
+    """
     config_dict = state["config"]
     metadata = state["model_metadata"]
     is_local = config_dict.get("deployment", {}).get("cloud") == "local"
@@ -134,6 +138,58 @@ def node_strategy_agent(state: PipelineState) -> PipelineState:
     if not available:
         warn("No backends available for the selected deployment mode, falling back to all backends")
         available = list_backends()
+
+    # ── Fast path: user explicitly chose a backend ────────────────────────
+    forced_backend = config_dict.get("deployment", {}).get("backend")
+    if forced_backend:                         # already normalised by Pydantic
+        step(f"Node 2 — Using user-selected backend: {forced_backend}")
+
+        if forced_backend not in available:
+            # Backend exists but isn't valid for this deploy mode
+            all_backends = list_backends()
+            if forced_backend in all_backends:
+                warn(
+                    f"Backend '{forced_backend}' does not support "
+                    f"{'local' if is_local else 'cloud'} deployment — "
+                    f"proceeding anyway (may require manual adjustments)."
+                )
+            else:
+                from backends.registry import registered_names
+                cli_error(
+                    f"Unknown backend '{forced_backend}'. "
+                    f"Available: {registered_names()}"
+                )
+                raise SystemExit(1)
+
+        decision = {
+            "selected_backend": forced_backend,
+            "reasoning": f"Backend explicitly set to '{forced_backend}' by user in deploy_config.yaml.",
+            "instance_type": "local" if is_local else "auto",
+            "gpu_type": config_dict.get("deployment", {}).get("gpu_required", "auto"),
+            "scaling_strategy": "single_container" if is_local else "horizontal",
+            "replicas_min": 1,
+            "replicas_max": 1 if is_local else 5,
+        }
+        reasoning = decision["reasoning"]
+        info(f"Selected backend: {forced_backend} (user override)")
+        info(f"Deployment mode: {'local' if is_local else 'cloud'}")
+
+        log.info(
+            "strategy_decision",
+            reasoning=True,
+            selected_backend=forced_backend,
+            local_deployment=is_local,
+            full_reasoning=reasoning,
+            decision=decision,
+            user_override=True,
+        )
+        return {
+            "strategy_decision": decision,
+            "strategy_reasoning": reasoning,
+        }
+
+    # ── Normal path: LLM-driven selection ─────────────────────────────────
+    step("Node 2 — Strategy Agent reasoning about deployment backend")
 
     # Build deployment mode context for the LLM
     deploy_mode = "LOCAL (Docker Compose on developer machine)" if is_local else "CLOUD"
@@ -537,6 +593,12 @@ terraform destroy
 |----------|-----|
 | Prediction | `{endpoint}` |
 | Monitoring | `{monitoring}` |
+
+## 📋 Sample Request
+
+```bash
+{deploy_result.get("sample_curl", f"curl -X POST {endpoint}")}
+```
 
 ## 📊 Observability
 

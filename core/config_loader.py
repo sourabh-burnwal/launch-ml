@@ -65,7 +65,18 @@ class DeploymentConfig(BaseModel):
 
     Set ``cloud: local`` to deploy locally via Docker containers instead
     of provisioning cloud infrastructure.
+
+    Set ``backend`` to force a specific serving backend (``fastapi``,
+    ``triton``, ``seldon``, ``vertex_ai``).  Leave as ``auto`` (the
+    default) to let the AI strategy agent pick the best one.
     """
+    backend: Optional[str] = Field(
+        None,
+        description=(
+            "Force a specific backend: fastapi | triton | seldon | vertex_ai. "
+            "Leave unset or 'auto' to let the AI choose."
+        ),
+    )
     cloud: Literal["gcp", "aws", "local"] = "gcp"
     region: str = "us-central1"
     latency_target_ms: int = Field(200, ge=1)
@@ -77,6 +88,22 @@ class DeploymentConfig(BaseModel):
     def is_local(self) -> bool:
         """True when the user wants local Docker deployment."""
         return self.cloud == "local"
+
+    @property
+    def has_backend_override(self) -> bool:
+        """True when the user explicitly chose a backend."""
+        return self.backend is not None
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _normalise_backend(cls, v: Any) -> Optional[str]:
+        """Treat ``'auto'``, empty string, and ``None`` as 'let AI decide'."""
+        if v is None:
+            return None
+        v_str = str(v).strip().lower()
+        if v_str in ("auto", ""):
+            return None
+        return v_str
 
     @field_validator("gpu_required", mode="before")
     @classmethod

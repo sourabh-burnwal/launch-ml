@@ -100,12 +100,13 @@ class FastAPIBackend(DeploymentBackend):
     def deploy(self) -> Dict[str, Any]:
         """For POC: simulate deployment and return mock endpoint."""
         log.info("fastapi_deploy_start")
-        # In production this would run terraform apply; for POC we simulate
+        host = f"ml-fastapi-{self.config.deployment.region}.example.com"
         return {
             "status": "deployed",
-            "endpoint_url": f"https://ml-fastapi-{self.config.deployment.region}.example.com/predict",
-            "health_url": f"https://ml-fastapi-{self.config.deployment.region}.example.com/health",
+            "endpoint_url": f"https://{host}/predict",
+            "health_url": f"https://{host}/health",
             "backend": self.name,
+            "sample_curl": self._build_sample_curl(host),
         }
 
     def setup_observability(self) -> Dict[str, str]:
@@ -201,6 +202,7 @@ class FastAPIBackend(DeploymentBackend):
                 "monitoring_url": "http://localhost:8080/metrics",
                 "backend": self.name,
                 "stop_command": f"cd {compose_dir} && {' '.join(docker_cmd)} down",
+                "sample_curl": self._build_sample_curl(),
             }
         except subprocess.TimeoutExpired:
             log.error("fastapi_local_timeout")
@@ -230,6 +232,38 @@ class FastAPIBackend(DeploymentBackend):
         return self._render_app_generic()
 
     # ── app.py: wraps the user's entrypoint ────────────────────────────
+
+    def _build_sample_curl(self, host: str = "localhost:8080") -> str:
+        """Build a sample curl command for the FastAPI /predict endpoint."""
+        props = self.config.api.request_schema.properties
+        example: dict[str, Any] = {}
+        for name, prop_def in (props or {}).items():
+            jtype = prop_def.get("type", "string") if isinstance(prop_def, dict) else "string"
+            name_lower = name.lower()
+            if "url" in name_lower or "image" in name_lower:
+                example[name] = "https://example.com/image.jpg"
+            elif "text" in name_lower:
+                example[name] = "Hello, world!"
+            elif jtype == "string":
+                example[name] = f"example_{name}"
+            elif jtype == "number":
+                example[name] = 1.0
+            elif jtype == "integer":
+                example[name] = 1
+            elif jtype == "boolean":
+                example[name] = True
+            else:
+                example[name] = f"example_{name}"
+
+        if not example:
+            example = {"input": "example_value"}
+
+        body = json.dumps(example)
+        return (
+            f"curl -X POST http://{host}/predict \\\n"
+            f"  -H \"Content-Type: application/json\" \\\n"
+            f"  -d '{body}'"
+        )
 
     def _build_request_model_code(self) -> str:
         """Build a Pydantic ``PredictRequest`` model from the API request schema.
@@ -896,8 +930,7 @@ services:
             return ["docker-compose"]
         return None
 
-    @staticmethod
-    def _simulate_local_deploy() -> Dict[str, Any]:
+    def _simulate_local_deploy(self) -> Dict[str, Any]:
         """Return a simulated result when Docker is not available."""
         return {
             "status": "simulated_local",
@@ -906,4 +939,5 @@ services:
             "monitoring_url": "http://localhost:8080/metrics",
             "backend": "fastapi",
             "note": "Docker not available — simulated. Install Docker to deploy locally.",
+            "sample_curl": self._build_sample_curl(),
         }
