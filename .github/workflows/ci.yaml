@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check syntax (compile all modules)
+        run: |
+          python -m py_compile deploy.py
+          python -m py_compile core/config_loader.py
+          python -m py_compile core/model_analyzer.py
+          python -m py_compile core/llm_client.py
+          python -m py_compile core/agent_graph.py
+          python -m py_compile backends/base.py
+          python -m py_compile backends/registry.py
+          python -m py_compile backends/fastapi_backend.py
+          python -m py_compile backends/triton_backend.py
+          python -m py_compile backends/seldon_backend.py
+          python -m py_compile backends/vertex_ai_backend.py
+          python -m py_compile utils/logger.py
+          python -m py_compile utils/terraform_runner.py
+
+      - name: Run pipeline (mock mode — no API key)
+        run: |
+          python deploy.py --config deploy_config.yaml
+
+      - name: Verify generated outputs exist
+        run: |
+          test -f generated/DEPLOYMENT_SUMMARY.md
+          test -f generated/terraform/main.tf
+          test -f generated/serving_code/app.py
+          echo "All expected outputs generated successfully."

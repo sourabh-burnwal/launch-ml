@@ -1,0 +1,39 @@
+# ==============================================================================
+# LaunchML - Deployment Configuration
+# ==============================================================================
+# Copy this file and customize for your model deployment.
+# Run: python deploy.py --config deploy_config.yaml
+# ==============================================================================
+
+model:
+  path: ./model_dir                # Path to your model directory
+  framework_hint: pytorch          # optional: pytorch | tensorflow | onnx | transformers
+  entrypoint: predict.py           # optional: custom inference entrypoint
+
+api:
+  request_schema:
+    type: object
+    properties:
+      text:
+        type: string
+  response_schema:
+    type: object
+    properties:
+      prediction:
+        type: string
+
+deployment:
+  cloud: gcp                       # gcp | aws | local
+  region: us-central1
+  latency_target_ms: 200
+  expected_rps: 50
+  load_balancer: public            # public | private
+  gpu_required: auto               # auto | true | false
+
+observability:
+  enable_metrics: true
+  enable_logging: true
+
+llm:
+  provider: openai                 # openai | anthropic | gemini
+  model: gpt-4o

@@ -1,0 +1,33 @@
+{# Triton model config template #}
+name: "{{ model_name }}"
+platform: "{{ platform }}"
+
+max_batch_size: {{ max_batch_size | default(8) }}
+
+input [
+  {
+    name: "INPUT"
+    data_type: TYPE_FP32
+    dims: {{ input_dims | default("[-1]") }}
+  }
+]
+
+output [
+  {
+    name: "OUTPUT"
+    data_type: TYPE_FP32
+    dims: {{ output_dims | default("[-1]") }}
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [2, 4, 8]
+  max_queue_delay_microseconds: 100
+}
+
+instance_group [
+  {
+    count: 1
+    kind: {{ "KIND_GPU" if gpu else "KIND_CPU" }}
+  }
+]

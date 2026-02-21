@@ -1,0 +1,5 @@
+{
+  "do_lower_case": true,
+  "model_max_length": 512,
+  "_note": "Sample tokenizer config for ML Orchestrator demo"
+}
