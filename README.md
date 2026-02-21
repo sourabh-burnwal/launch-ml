@@ -1,22 +1,25 @@
 <p align="center">
-  <h1 align="center">🚀 LaunchML</h1>
-  <p align="center">
-    <strong>AI-driven ML model deployment — from directory to endpoint in one command.</strong>
-  </p>
-  <p align="center">
-    <a href="#quickstart">Quickstart</a> •
-    <a href="#how-it-works">How It Works</a> •
-    <a href="#configuration">Configuration</a> •
-    <a href="#backends">Backends</a> •
-    <a href="#extending">Extending</a> •
-    <a href="#contributing">Contributing</a>
-  </p>
-  <p align="center">
-    <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" alt="Python 3.11+" />
-    <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
-    <img src="https://img.shields.io/badge/LangGraph-orchestrated-purple" alt="LangGraph" />
-    <img src="https://img.shields.io/badge/IaC-Terraform-623CE4?logo=terraform" alt="Terraform" />
-  </p>
+  <img src="assets/launchml-logo.png" alt="LaunchML" width="500" />
+</p>
+
+<p align="center">
+  <strong>AI-driven ML model deployment — from directory to endpoint in one command.</strong>
+</p>
+
+<p align="center">
+  <a href="#quickstart">Quickstart</a> •
+  <a href="#how-it-works">How It Works</a> •
+  <a href="#configuration">Configuration</a> •
+  <a href="#backends">Backends</a> •
+  <a href="#extending">Extending</a> •
+  <a href="#contributing">Contributing</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+  <img src="https://img.shields.io/badge/LangGraph-orchestrated-purple" alt="LangGraph" />
+  <img src="https://img.shields.io/badge/IaC-Terraform-623CE4?logo=terraform" alt="Terraform" />
 </p>
 
 ---
