@@ -27,7 +27,6 @@
 LaunchML analyzes a local ML model directory, uses an LLM to reason about the best deployment strategy, generates infrastructure-as-code, and deploys it — outputting a working prediction endpoint.
 
 ```bash
-pip install .
 launch-ml --model-dir ./my_model --config deploy_config.yaml --output-dir ./output
 ```
 
@@ -71,7 +70,9 @@ pip install .
 > pip install -e .
 > ```
 
-### Set up your LLM (optional)
+### Set up your LLM
+
+LaunchML uses an LLM to analyze your model and generate deployment code. Export one of the following API keys:
 
 ```bash
 # Pick one:
@@ -84,14 +85,22 @@ cp .env.example .env
 # Then edit .env with your key
 ```
 
-> **No API key?** LaunchML automatically falls back to a mock LLM so you can test the full pipeline end-to-end without spending a cent.
-
 ### Run the pipeline
 
 ```bash
 launch-ml \
   --model-dir ./model_dir \
   --config deploy_config.yaml \
+  --output-dir ./output
+```
+
+#### Run an example
+
+```bash
+# Deploy a FastAPI sentiment analysis service locally
+launch-ml \
+  --model-dir ./examples/fastapi/sentiment_analysis \
+  --config ./examples/fastapi/sentiment_analysis/deploy_config.yaml \
   --output-dir ./output
 ```
 
