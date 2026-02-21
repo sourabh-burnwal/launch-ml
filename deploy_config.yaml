@@ -23,7 +23,7 @@ api:
         type: string
 
 deployment:
-  cloud: gcp                       # gcp | aws | local
+  cloud: gcp                       # gcp | aws | local (local = containerize & run via Docker)
   region: us-central1
   latency_target_ms: 200
   expected_rps: 50

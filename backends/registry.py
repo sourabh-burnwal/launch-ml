@@ -67,13 +67,19 @@ def discover_backends() -> None:
     log.info("backends_discovered", count=len(_REGISTRY), names=list(_REGISTRY.keys()))
 
 
-def list_backends() -> Dict[str, Dict[str, Any]]:
-    """Return ``{name: capabilities_dict}`` for every registered backend."""
+def list_backends(*, local_only: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Return ``{name: capabilities_dict}`` for every registered backend.
+
+    Args:
+        local_only: If True, only return backends that support local
+            deployment (``supports_local_deployment=True``).
+    """
     result: Dict[str, Dict[str, Any]] = {}
     for name, cls in _REGISTRY.items():
-        # Instantiate with dummy args just to read capabilities
         try:
             caps = cls.capabilities  # class-level attribute
+            if local_only and not caps.supports_local_deployment:
+                continue
             result[name] = {
                 "name": name,
                 "description": getattr(cls, "description", ""),
@@ -81,6 +87,7 @@ def list_backends() -> Dict[str, Dict[str, Any]]:
                 "supports_batching": caps.supports_batching,
                 "supports_autoscaling": caps.supports_autoscaling,
                 "managed_service": caps.managed_service,
+                "supports_local_deployment": caps.supports_local_deployment,
                 "supported_frameworks": caps.supported_frameworks,
                 "typical_latency_ms": caps.typical_latency_ms,
                 "complexity": caps.complexity,

@@ -95,7 +95,8 @@ def main(config_path: str, dry_run: bool, json_logs: bool, verbose: bool) -> Non
     step("Loading configuration")
     from core.config_loader import load_config
     config = load_config(config_path)
-    info(f"Cloud: {config.deployment.cloud}  |  Region: {config.deployment.region}")
+    deploy_mode = "LOCAL (Docker)" if config.deployment.is_local else f"CLOUD ({config.deployment.cloud})"
+    info(f"Deploy mode: {deploy_mode}  |  Region: {config.deployment.region}")
     info(f"LLM: {config.llm.provider}/{config.llm.model}")
 
     # ── 2. Run pipeline ───────────────────────────────────────────────────
@@ -123,8 +124,8 @@ def _print_banner() -> None:
     console.print(
         "\n[bold cyan]"
         "╔══════════════════════════════════════════════════════════════╗\n"
-        "║                    🚀  LaunchML  🚀                        ║\n"
-        "║        AI-Driven Model Deployment Pipeline                 ║\n"
+        "║                          LaunchML                            ║\n"
+        "║              AI-Driven Model Deployment Pipeline             ║\n"
         "╚══════════════════════════════════════════════════════════════╝"
         "[/bold cyan]\n"
     )
@@ -138,7 +139,11 @@ def _print_results(state: dict, elapsed: float, dry_run: bool) -> None:
     # Strategy decision
     decision = state.get("strategy_decision", {})
     deploy = state.get("deployment_result", {})
+    config_dict = state.get("config", {})
+    is_local = config_dict.get("deployment", {}).get("cloud") == "local"
 
+    deploy_mode = "🏠 Local (Docker)" if is_local else "☁️ Cloud"
+    console.print(f"  [cyan]Mode:[/cyan]           {deploy_mode}")
     console.print(f"  [cyan]Backend:[/cyan]        {decision.get('selected_backend', 'N/A')}")
     console.print(f"  [cyan]Instance:[/cyan]       {decision.get('instance_type', 'N/A')}")
     console.print(f"  [cyan]GPU:[/cyan]            {decision.get('gpu_type', 'none')}")
@@ -150,6 +155,10 @@ def _print_results(state: dict, elapsed: float, dry_run: bool) -> None:
         monitoring = deploy.get("monitoring_url", "N/A")
         console.print(f"  [green]Endpoint:[/green]       {endpoint}")
         console.print(f"  [green]Monitoring:[/green]     {monitoring}")
+        if is_local:
+            stop_cmd = deploy.get("stop_command", "")
+            if stop_cmd:
+                console.print(f"  [yellow]Stop:[/yellow]           {stop_cmd}")
     else:
         console.print("  [yellow](dry-run mode — deployment skipped)[/yellow]")
 

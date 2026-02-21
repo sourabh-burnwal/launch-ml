@@ -38,6 +38,7 @@ class BackendCapabilities:
     supports_multi_model: bool = False
     supports_streaming: bool = False
     managed_service: bool = False
+    supports_local_deployment: bool = False
     max_model_size_gb: float = 10.0
     supported_frameworks: list[str] = field(
         default_factory=lambda: ["pytorch", "tensorflow", "onnx", "transformers"]
@@ -118,6 +119,37 @@ class DeploymentBackend(ABC):
         ...
 
     # ------------------------------------------------------------------
+    # Local deployment (optional — override in backends that support it)
+    # ------------------------------------------------------------------
+
+    def generate_local_compose(self) -> Dict[str, str]:
+        """Generate ``docker-compose.yaml`` and any extra files for local dev.
+
+        Override in backends where ``capabilities.supports_local_deployment``
+        is True.  The default raises so callers never silently skip.
+
+        Returns:
+            Mapping of ``filename -> contents`` written under
+            ``generated/serving_code/``.
+        """
+        raise NotImplementedError(
+            f"Backend '{self.name}' does not support local deployment."
+        )
+
+    def deploy_local(self) -> Dict[str, Any]:
+        """Build images, start containers, and expose the inference server locally.
+
+        Override in backends where ``capabilities.supports_local_deployment``
+        is True.  The default raises.
+
+        Returns:
+            Dict with at least ``endpoint_url`` and ``status``.
+        """
+        raise NotImplementedError(
+            f"Backend '{self.name}' does not support local deployment."
+        )
+
+    # ------------------------------------------------------------------
     # Helpers available to all backends
     # ------------------------------------------------------------------
 
@@ -152,6 +184,7 @@ class DeploymentBackend(ABC):
             "supports_multi_model": cap.supports_multi_model,
             "supports_streaming": cap.supports_streaming,
             "managed_service": cap.managed_service,
+            "supports_local_deployment": cap.supports_local_deployment,
             "max_model_size_gb": cap.max_model_size_gb,
             "supported_frameworks": cap.supported_frameworks,
             "typical_latency_ms": cap.typical_latency_ms,

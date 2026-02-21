@@ -7,11 +7,16 @@ This is the simplest, most flexible backend:
     - Supports custom predict.py entrypoints
     - Easy horizontal scaling via Terraform-managed instance groups
     - Prometheus metrics + structured logging out of the box
+    - **Local deployment** via Docker Compose for rapid dev iteration
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any, Dict
 
 from backends.base import BackendCapabilities, DeploymentBackend
@@ -35,6 +40,7 @@ class FastAPIBackend(DeploymentBackend):
         supports_multi_model=False,
         supports_streaming=True,
         managed_service=False,
+        supports_local_deployment=True,
         max_model_size_gb=10.0,
         supported_frameworks=["pytorch", "tensorflow", "onnx", "transformers"],
         typical_latency_ms=30,
@@ -90,20 +96,105 @@ class FastAPIBackend(DeploymentBackend):
         }
 
     def setup_observability(self) -> Dict[str, str]:
+        is_local = self.config.deployment.is_local
         instructions: Dict[str, str] = {}
         if self.config.observability.enable_metrics:
-            instructions["metrics"] = (
-                "Prometheus metrics are exposed at /metrics endpoint.\n"
-                "Scrape target: <endpoint_url>/metrics\n"
-                "Key metrics: request_count, request_latency_seconds, model_load_time"
-            )
+            if is_local:
+                instructions["metrics"] = (
+                    "Prometheus metrics are exposed at http://localhost:8080/metrics\n"
+                    "Key metrics: request_count, request_latency_seconds, model_load_time\n"
+                    "You can scrape this endpoint with a local Prometheus instance."
+                )
+            else:
+                instructions["metrics"] = (
+                    "Prometheus metrics are exposed at /metrics endpoint.\n"
+                    "Scrape target: <endpoint_url>/metrics\n"
+                    "Key metrics: request_count, request_latency_seconds, model_load_time"
+                )
         if self.config.observability.enable_logging:
-            instructions["logging"] = (
-                "Structured JSON logs are written to stdout.\n"
-                "Use Cloud Logging or ELK stack to aggregate.\n"
-                "Log fields: timestamp, level, request_id, latency_ms, status_code"
-            )
+            if is_local:
+                instructions["logging"] = (
+                    "Container logs stream to stdout (visible via docker compose logs).\n"
+                    "Run: docker compose -f generated/serving_code/docker-compose.yaml logs -f"
+                )
+            else:
+                instructions["logging"] = (
+                    "Structured JSON logs are written to stdout.\n"
+                    "Use Cloud Logging or ELK stack to aggregate.\n"
+                    "Log fields: timestamp, level, request_id, latency_ms, status_code"
+                )
         return instructions
+
+    # ------------------------------------------------------------------
+    # Local deployment
+    # ------------------------------------------------------------------
+
+    def generate_local_compose(self) -> Dict[str, str]:
+        """Generate docker-compose.yaml for local FastAPI serving."""
+        self.ensure_dirs()
+        model_path = Path(self.model_metadata.model_path).resolve()
+        files = {
+            "docker-compose.yaml": self._render_local_compose(model_path),
+        }
+        written = self.write_files(self.serving_dir, files)
+        log.info("fastapi_local_compose_generated", files=written)
+        return files
+
+    def deploy_local(self) -> Dict[str, Any]:
+        """Build image and start FastAPI container locally."""
+        log.info("fastapi_local_deploy_start")
+        compose_dir = self.serving_dir.resolve()
+        compose_file = compose_dir / "docker-compose.yaml"
+
+        if not compose_file.is_file():
+            log.error("fastapi_compose_missing", path=str(compose_file))
+            return {"status": "failed", "error": "docker-compose.yaml not found"}
+
+        docker_cmd = self._resolve_docker_compose_cmd()
+        if docker_cmd is None:
+            log.warning("docker_compose_not_found", msg="Simulating local deployment")
+            return self._simulate_local_deploy()
+
+        try:
+            # Stop any previous run
+            subprocess.run(
+                [*docker_cmd, "down", "--remove-orphans"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=60,
+            )
+            # Build
+            log.info("fastapi_local_build")
+            build = subprocess.run(
+                [*docker_cmd, "build"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=300,
+            )
+            if build.returncode != 0:
+                log.error("fastapi_local_build_failed", stderr=build.stderr[:500])
+                return {"status": "failed", "error": build.stderr[:500]}
+
+            # Start in detached mode
+            log.info("fastapi_local_up")
+            up = subprocess.run(
+                [*docker_cmd, "up", "-d"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=120,
+            )
+            if up.returncode != 0:
+                log.error("fastapi_local_up_failed", stderr=up.stderr[:500])
+                return {"status": "failed", "error": up.stderr[:500]}
+
+            return {
+                "status": "running_locally",
+                "endpoint_url": "http://localhost:8080/predict",
+                "health_url": "http://localhost:8080/health",
+                "monitoring_url": "http://localhost:8080/metrics",
+                "backend": self.name,
+                "stop_command": f"cd {compose_dir} && {' '.join(docker_cmd)} down",
+            }
+        except subprocess.TimeoutExpired:
+            log.error("fastapi_local_timeout")
+            return {"status": "failed", "error": "Docker command timed out"}
+        except Exception as exc:
+            log.error("fastapi_local_error", error=str(exc))
+            return self._simulate_local_deploy()
 
     # ------------------------------------------------------------------
     # Code generation helpers
@@ -384,3 +475,76 @@ output "service_name" {
   value = google_cloud_run_v2_service.ml_service.name
 }
 '''
+
+    # ------------------------------------------------------------------
+    # Local deployment helpers
+    # ------------------------------------------------------------------
+
+    def _render_local_compose(self, model_path: Path) -> str:
+        gpu = self.model_metadata.gpu_recommendation == "true"
+        gpu_block = ""
+        if gpu:
+            gpu_block = (
+                "    deploy:\n"
+                "      resources:\n"
+                "        reservations:\n"
+                "          devices:\n"
+                "            - driver: nvidia\n"
+                "              count: 1\n"
+                "              capabilities: [gpu]\n"
+            )
+        return f"""# Local FastAPI Deployment — auto-generated by LaunchML
+# Usage:
+#   docker compose up --build        (foreground)
+#   docker compose up --build -d     (detached)
+#   docker compose down              (stop)
+
+services:
+  fastapi-ml:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: launchml-fastapi
+    ports:
+      - "8080:8080"
+    volumes:
+      - {model_path}:/app/model:ro
+    environment:
+      - MODEL_PATH=/app/model
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+{gpu_block}"""
+
+    @staticmethod
+    def _resolve_docker_compose_cmd() -> list[str] | None:
+        """Return the docker compose CLI command, or None if unavailable."""
+        # Prefer `docker compose` (v2 plugin)
+        if shutil.which("docker"):
+            result = subprocess.run(
+                ["docker", "compose", "version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return ["docker", "compose"]
+        # Fall back to standalone docker-compose
+        if shutil.which("docker-compose"):
+            return ["docker-compose"]
+        return None
+
+    @staticmethod
+    def _simulate_local_deploy() -> Dict[str, Any]:
+        """Return a simulated result when Docker is not available."""
+        return {
+            "status": "simulated_local",
+            "endpoint_url": "http://localhost:8080/predict",
+            "health_url": "http://localhost:8080/health",
+            "monitoring_url": "http://localhost:8080/metrics",
+            "backend": "fastapi",
+            "note": "Docker not available — simulated. Install Docker to deploy locally.",
+        }

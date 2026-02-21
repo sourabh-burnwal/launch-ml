@@ -92,8 +92,8 @@ You'll see:
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║              🚀  LaunchML  🚀                               ║
-║     AI-Driven Model Deployment Pipeline                     ║
+║                          LaunchML                            ║
+║             AI-Driven Model Deployment Pipeline              ║
 ╚══════════════════════════════════════════════════════════════╝
 
 ▶ Node 1 — Analyzing model directory
@@ -137,23 +137,23 @@ LaunchML uses a **LangGraph** state graph to orchestrate six pipeline nodes:
 
 ```
 ┌─────────────────────┐
-│  1. Model Analyzer   │  Scans model dir → framework, size, GPU heuristic
+│  1. Model Analyzer  │  Scans model dir → framework, size, GPU heuristic
 └──────────┬──────────┘
            ▼
 ┌─────────────────────┐
-│  2. Strategy Agent   │  LLM reasons about best backend (logged + auditable)
+│  2. Strategy Agent  │  LLM reasons about best backend (logged + auditable)
 └──────────┬──────────┘
            ▼
 ┌─────────────────────┐
-│  3. Backend Plugin   │  Generates inference code + Terraform via plugin
+│  3. Backend Plugin  │  Generates inference code + Terraform via plugin
 └──────────┬──────────┘
            ▼
 ┌─────────────────────┐
-│  4. Deploy Executor  │  Runs terraform init → plan → apply
+│  4. Deploy Executor │  Runs terraform init → plan → apply
 └──────────┬──────────┘
            ▼
 ┌─────────────────────┐
-│  5. Observability    │  Configures metrics/logging, writes summary
+│  5. Observability   │  Configures metrics/logging, writes summary
 └─────────────────────┘
 ```
 

@@ -61,13 +61,22 @@ class APIConfig(BaseModel):
 
 
 class DeploymentConfig(BaseModel):
-    """Infrastructure / deployment knobs."""
+    """Infrastructure / deployment knobs.
+
+    Set ``cloud: local`` to deploy locally via Docker containers instead
+    of provisioning cloud infrastructure.
+    """
     cloud: Literal["gcp", "aws", "local"] = "gcp"
     region: str = "us-central1"
     latency_target_ms: int = Field(200, ge=1)
     expected_rps: int = Field(50, ge=1)
     load_balancer: Literal["public", "private"] = "public"
     gpu_required: Literal["auto", "true", "false"] = "auto"
+
+    @property
+    def is_local(self) -> bool:
+        """True when the user wants local Docker deployment."""
+        return self.cloud == "local"
 
     @field_validator("gpu_required", mode="before")
     @classmethod

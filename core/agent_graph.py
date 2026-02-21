@@ -1,31 +1,35 @@
 """
 Agent Graph — LangGraph-based orchestration pipeline for LaunchML.
 
-This is the brain of the system. It wires together six nodes into a
-directed acyclic graph:
+This is the brain of the system. It wires together nodes into a
+directed acyclic graph with a conditional branch for local vs cloud
+deployment:
 
     ┌─────────────────┐
-    │ Model Analyzer   │  ← Node 1: scan model dir, emit metadata
+    │ Model Analyzer  │  ← Node 1: scan model dir, emit metadata
     └───────┬─────────┘
             ▼
     ┌─────────────────┐
-    │ Strategy Agent   │  ← Node 2: LLM reasons about best backend
+    │ Strategy Agent  │  ← Node 2: LLM reasons about best backend
     └───────┬─────────┘
             ▼
     ┌─────────────────┐
-    │ Backend Plugin   │  ← Node 3: generate inference code + Terraform
+    │ Backend Plugin  │  ← Node 3: generate inference code + IaC / compose
     └───────┬─────────┘
             ▼
+       ┌────┴────┐
+       │ local?  │
+       └────┬────┘
+      ┌─────┴──────┐
+      ▼            ▼
+ ┌──────────┐ ┌──────────────┐
+ │ Local    │ │ Terraform /  │
+ │ Docker   │ │ Cloud Deploy │
+ └────┬─────┘ └──────┬───────┘
+      └───────┬──────┘
+              ▼
     ┌─────────────────┐
-    │ Terraform Gen    │  ← Node 4: (merged into Node 3 for simplicity)
-    └───────┬─────────┘
-            ▼
-    ┌─────────────────┐
-    │ Deploy Executor  │  ← Node 5: run terraform apply / simulate
-    └───────┬─────────┘
-            ▼
-    ┌─────────────────┐
-    │ Observability    │  ← Node 6: setup monitoring, emit summary
+    │ Observability   │  ← Node 6: setup monitoring, emit summary
     └─────────────────┘
 
 State is carried in a ``PipelineState`` TypedDict that grows as each
@@ -36,6 +40,9 @@ Architecture decisions:
     - Each node is a pure function ``(state) -> partial state update``.
     - LLM calls happen only in Node 2 (Strategy Agent); everything else
       is deterministic so the pipeline is reproducible.
+    - When ``cloud: local`` is set, the graph skips Terraform and instead
+      generates docker-compose files, builds images, and starts containers
+      locally.
 """
 
 from __future__ import annotations
@@ -118,19 +125,38 @@ def node_strategy_agent(state: PipelineState) -> PipelineState:
 
     config_dict = state["config"]
     metadata = state["model_metadata"]
+    is_local = config_dict.get("deployment", {}).get("cloud") == "local"
 
     # Ensure backends are discovered
     discover_backends()
-    available = list_backends()
+    available = list_backends(local_only=is_local)
+
+    if not available:
+        warn("No backends available for the selected deployment mode, falling back to all backends")
+        available = list_backends()
+
+    # Build deployment mode context for the LLM
+    deploy_mode = "LOCAL (Docker Compose on developer machine)" if is_local else "CLOUD"
+    local_constraint = ""
+    if is_local:
+        local_constraint = (
+            "\n\nIMPORTANT: The user has requested LOCAL DEPLOYMENT mode.\n"
+            "The model will be containerized and run on the developer's local machine "
+            "using Docker. Select the backend that is easiest to run locally while "
+            "still meeting the model's requirements. Prefer simplicity for local dev.\n"
+            "Instance type should be 'local' and scaling_strategy should be 'single_container'."
+        )
 
     # Build the LLM prompt
-    system_prompt = """You are an expert ML infrastructure engineer. Your task is to analyze 
+    system_prompt = f"""You are an expert ML infrastructure engineer. Your task is to analyze 
 a machine learning model and its deployment requirements, then select the optimal 
 deployment backend.
 
+Deployment mode: {deploy_mode}
+
 You MUST respond with a valid JSON object (no markdown, no explanation outside the JSON).
 The JSON must have these exact keys:
-{
+{{
   "selected_backend": "<backend_name>",
   "reasoning": "<detailed reasoning>",
   "instance_type": "<compute instance type>",
@@ -138,14 +164,15 @@ The JSON must have these exact keys:
   "scaling_strategy": "<scaling approach>",
   "replicas_min": <int>,
   "replicas_max": <int>
-}
+}}
 
-The selected_backend MUST be one of the available backend names provided."""
+The selected_backend MUST be one of the available backend names provided.{local_constraint}"""
 
     user_prompt = f"""## Model Metadata
 {json.dumps(metadata, indent=2)}
 
 ## User Deployment Config
+- Deployment mode: {deploy_mode}
 - Cloud: {config_dict.get('deployment', {}).get('cloud', 'gcp')}
 - Region: {config_dict.get('deployment', {}).get('region', 'us-central1')}
 - Latency target: {config_dict.get('deployment', {}).get('latency_target_ms', 200)}ms
@@ -180,12 +207,14 @@ Select the best backend and explain your reasoning considering:
     reasoning = decision.get("reasoning", "No reasoning provided.")
 
     info(f"Selected backend: {selected}")
+    info(f"Deployment mode: {'local' if is_local else 'cloud'}")
     info(f"Reasoning: {reasoning[:200]}...")
 
     log.info(
         "strategy_decision",
         reasoning=True,
         selected_backend=selected,
+        local_deployment=is_local,
         full_reasoning=reasoning,
         decision=decision,
     )
@@ -197,13 +226,17 @@ Select the best backend and explain your reasoning considering:
 
 
 def node_backend_plugin(state: PipelineState) -> PipelineState:
-    """Node 3: Execute the selected backend plugin to generate code + Terraform."""
-    step("Node 3 — Generating inference code and Terraform")
-
+    """Node 3: Execute the selected backend plugin to generate code + IaC/compose."""
     config_dict = state["config"]
     metadata_dict = state["model_metadata"]
     decision = state["strategy_decision"]
     selected = decision.get("selected_backend", "fastapi")
+    is_local = config_dict.get("deployment", {}).get("cloud") == "local"
+
+    if is_local:
+        step("Node 3 — Generating inference code and Docker Compose (local mode)")
+    else:
+        step("Node 3 — Generating inference code and Terraform")
 
     # Reconstruct typed objects
     config = DeployConfig(**config_dict)
@@ -220,47 +253,67 @@ def node_backend_plugin(state: PipelineState) -> PipelineState:
     serving_files = backend.generate_inference_code()
     info(f"Generated {len(serving_files)} serving files")
 
-    # Generate Terraform
-    terraform_files = backend.generate_terraform()
-    info(f"Generated {len(terraform_files)} Terraform files")
-
-    return {
-        "generated_serving_files": serving_files,
-        "generated_terraform_files": terraform_files,
-    }
+    if is_local:
+        # Generate docker-compose for local deployment
+        compose_files = backend.generate_local_compose()
+        info(f"Generated {len(compose_files)} local deployment files")
+        return {
+            "generated_serving_files": {**serving_files, **compose_files},
+            "generated_terraform_files": {},
+        }
+    else:
+        # Generate Terraform for cloud deployment
+        terraform_files = backend.generate_terraform()
+        info(f"Generated {len(terraform_files)} Terraform files")
+        return {
+            "generated_serving_files": serving_files,
+            "generated_terraform_files": terraform_files,
+        }
 
 
 def node_deploy_executor(state: PipelineState) -> PipelineState:
-    """Node 5: Run Terraform to deploy infrastructure."""
-    step("Node 5 — Deploying infrastructure")
-
+    """Node 5: Deploy — locally via Docker or to cloud via Terraform."""
     config_dict = state["config"]
     decision = state["strategy_decision"]
     selected = decision.get("selected_backend", "fastapi")
+    is_local = config_dict.get("deployment", {}).get("cloud") == "local"
 
-    terraform_dir = Path("generated/terraform")
-
-    # Use TerraformRunner (auto-simulates if CLI not available)
-    runner = TerraformRunner(terraform_dir, simulate=True)  # POC: always simulate
-
-    info("Running terraform init...")
-    runner.init()
-
-    info("Running terraform apply...")
-    apply_result = runner.apply()
-
-    outputs = runner.output()
-
-    # Also call the backend's deploy() for any extra steps
     config = DeployConfig(**config_dict)
     metadata = _dict_to_metadata(state["model_metadata"])
     backend = get_backend(selected, config, metadata)
-    deploy_result = backend.deploy()
 
-    # Merge terraform outputs with backend deploy result
-    deploy_result.update(outputs)
+    if is_local:
+        step("Node 5 — Deploying locally via Docker")
+        deploy_result = backend.deploy_local()
+        status = deploy_result.get("status", "unknown")
+        endpoint = deploy_result.get("endpoint_url", "N/A")
+        if status in ("running_locally", "simulated_local"):
+            success(f"Local deployment complete! Endpoint: {endpoint}")
+        else:
+            warn(f"Local deployment finished with status: {status}")
+    else:
+        step("Node 5 — Deploying infrastructure via Terraform")
 
-    success(f"Deployment complete! Endpoint: {deploy_result.get('endpoint_url', 'N/A')}")
+        terraform_dir = Path("generated/terraform")
+
+        # Use TerraformRunner (auto-simulates if CLI not available)
+        runner = TerraformRunner(terraform_dir, simulate=True)  # POC: always simulate
+
+        info("Running terraform init...")
+        runner.init()
+
+        info("Running terraform apply...")
+        runner.apply()
+
+        outputs = runner.output()
+
+        # Also call the backend's deploy() for any extra steps
+        deploy_result = backend.deploy()
+
+        # Merge terraform outputs with backend deploy result
+        deploy_result.update(outputs)
+
+        success(f"Deployment complete! Endpoint: {deploy_result.get('endpoint_url', 'N/A')}")
 
     return {"deployment_result": deploy_result}
 
@@ -390,10 +443,59 @@ def _generate_summary(
     selected = decision.get("selected_backend", "unknown")
     endpoint = deploy_result.get("endpoint_url", "N/A")
     monitoring = deploy_result.get("monitoring_url", "N/A")
+    is_local = config_dict.get("deployment", {}).get("cloud") == "local"
 
     obs_section = ""
     for key, val in obs_instructions.items():
         obs_section += f"### {key.title()}\n{val}\n\n"
+
+    deploy_mode = "🏠 Local (Docker)" if is_local else "☁️ Cloud"
+    stop_cmd = deploy_result.get("stop_command", "")
+
+    if is_local:
+        redeploy_section = f"""## 🔄 How to Redeploy
+
+```bash
+# Re-run the full pipeline
+python deploy.py --config deploy_config.yaml
+
+# Or rebuild and restart containers manually
+cd generated/serving_code
+docker compose up --build -d
+```
+
+## 💥 How to Stop Local Containers
+
+```bash
+{stop_cmd if stop_cmd else "cd generated/serving_code && docker compose down"}
+```"""
+        files_section = """## 📁 Generated Files
+
+- `generated/serving_code/` — Inference server code + docker-compose.yaml
+- `generated/DEPLOYMENT_SUMMARY.md` — This file"""
+    else:
+        redeploy_section = """## 🔄 How to Redeploy
+
+```bash
+# Re-run the full pipeline
+python deploy.py --config deploy_config.yaml
+
+# Or apply Terraform changes only
+cd generated/terraform
+terraform apply
+```
+
+## 💥 How to Destroy Infrastructure
+
+```bash
+cd generated/terraform
+terraform destroy
+```"""
+        files_section = """## 📁 Generated Files
+
+- `generated/serving_code/` — Inference server code
+- `generated/terraform/` — Infrastructure as Code
+- `generated/DEPLOYMENT_SUMMARY.md` — This file"""
 
     return f"""# LaunchML — Deployment Summary
 
@@ -415,6 +517,7 @@ def _generate_summary(
 
 | Property | Value |
 |----------|-------|
+| Deploy Mode | {deploy_mode} |
 | Selected Backend | **{selected}** |
 | Instance Type | {decision.get('instance_type', 'N/A')} |
 | GPU Type | {decision.get('gpu_type', 'none')} |
@@ -437,29 +540,9 @@ def _generate_summary(
 
 {obs_section}
 
-## 🔄 How to Redeploy
+{redeploy_section}
 
-```bash
-# Re-run the full pipeline
-python deploy.py --config deploy_config.yaml
-
-# Or apply Terraform changes only
-cd generated/terraform
-terraform apply
-```
-
-## 💥 How to Destroy Infrastructure
-
-```bash
-cd generated/terraform
-terraform destroy
-```
-
-## 📁 Generated Files
-
-- `generated/serving_code/` — Inference server code
-- `generated/terraform/` — Infrastructure as Code
-- `generated/DEPLOYMENT_SUMMARY.md` — This file
+{files_section}
 
 ---
 

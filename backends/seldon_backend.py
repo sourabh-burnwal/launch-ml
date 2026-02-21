@@ -6,11 +6,15 @@ Best for:
     - A/B testing and canary deployments
     - Multi-model serving with custom routing
     - Organizations already running Seldon on K8s
+    - **Local deployment** via Docker Compose with seldon-core-microservice
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any, Dict
 
 from backends.base import BackendCapabilities, DeploymentBackend
@@ -34,6 +38,7 @@ class SeldonBackend(DeploymentBackend):
         supports_multi_model=True,
         supports_streaming=False,
         managed_service=False,
+        supports_local_deployment=True,
         max_model_size_gb=20.0,
         supported_frameworks=["pytorch", "tensorflow", "onnx", "transformers"],
         typical_latency_ms=20,
@@ -80,22 +85,105 @@ class SeldonBackend(DeploymentBackend):
         }
 
     def setup_observability(self) -> Dict[str, str]:
+        is_local = self.config.deployment.is_local
         instructions: Dict[str, str] = {}
         if self.config.observability.enable_metrics:
-            instructions["metrics"] = (
-                "Seldon Core exposes Prometheus metrics automatically.\n"
-                "Install Seldon Analytics dashboard for Grafana:\n"
-                "  helm install seldon-analytics seldon-charts/seldon-analytics\n"
-                "Key metrics: seldon_api_executor_server_requests_seconds, "
-                "seldon_api_executor_server_requests_total"
-            )
+            if is_local:
+                instructions["metrics"] = (
+                    "Seldon microservice exposes Prometheus metrics at http://localhost:6000/prometheus\n"
+                    "Key metrics: seldon_api_executor_server_requests_seconds, "
+                    "seldon_api_executor_server_requests_total\n"
+                    "You can scrape this endpoint with a local Prometheus instance."
+                )
+            else:
+                instructions["metrics"] = (
+                    "Seldon Core exposes Prometheus metrics automatically.\n"
+                    "Install Seldon Analytics dashboard for Grafana:\n"
+                    "  helm install seldon-analytics seldon-charts/seldon-analytics\n"
+                    "Key metrics: seldon_api_executor_server_requests_seconds, "
+                    "seldon_api_executor_server_requests_total"
+                )
         if self.config.observability.enable_logging:
-            instructions["logging"] = (
-                "Enable request logging in SeldonDeployment spec:\n"
-                "  predictors[0].logger.mode: all\n"
-                "Logs are sent to a configured Kafka/ELK endpoint."
-            )
+            if is_local:
+                instructions["logging"] = (
+                    "Container logs stream to stdout (visible via docker compose logs).\n"
+                    "Run: docker compose -f generated/serving_code/docker-compose.yaml logs -f"
+                )
+            else:
+                instructions["logging"] = (
+                    "Enable request logging in SeldonDeployment spec:\n"
+                    "  predictors[0].logger.mode: all\n"
+                    "Logs are sent to a configured Kafka/ELK endpoint."
+                )
         return instructions
+
+    # ------------------------------------------------------------------
+    # Local deployment
+    # ------------------------------------------------------------------
+
+    def generate_local_compose(self) -> Dict[str, str]:
+        """Generate docker-compose.yaml for local Seldon serving."""
+        self.ensure_dirs()
+        model_path = Path(self.model_metadata.model_path).resolve()
+        files = {
+            "docker-compose.yaml": self._render_local_compose(model_path),
+        }
+        written = self.write_files(self.serving_dir, files)
+        log.info("seldon_local_compose_generated", files=written)
+        return files
+
+    def deploy_local(self) -> Dict[str, Any]:
+        """Build image and start Seldon microservice container locally."""
+        log.info("seldon_local_deploy_start")
+        compose_dir = self.serving_dir.resolve()
+        compose_file = compose_dir / "docker-compose.yaml"
+
+        if not compose_file.is_file():
+            log.error("seldon_compose_missing", path=str(compose_file))
+            return {"status": "failed", "error": "docker-compose.yaml not found"}
+
+        docker_cmd = self._resolve_docker_compose_cmd()
+        if docker_cmd is None:
+            log.warning("docker_compose_not_found", msg="Simulating local deployment")
+            return self._simulate_local_deploy()
+
+        try:
+            subprocess.run(
+                [*docker_cmd, "down", "--remove-orphans"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=60,
+            )
+            log.info("seldon_local_build")
+            build = subprocess.run(
+                [*docker_cmd, "build"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=300,
+            )
+            if build.returncode != 0:
+                log.error("seldon_local_build_failed", stderr=build.stderr[:500])
+                return {"status": "failed", "error": build.stderr[:500]}
+
+            log.info("seldon_local_up")
+            up = subprocess.run(
+                [*docker_cmd, "up", "-d"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=120,
+            )
+            if up.returncode != 0:
+                log.error("seldon_local_up_failed", stderr=up.stderr[:500])
+                return {"status": "failed", "error": up.stderr[:500]}
+
+            return {
+                "status": "running_locally",
+                "endpoint_url": "http://localhost:5000/predict",
+                "health_url": "http://localhost:5000/health/status",
+                "monitoring_url": "http://localhost:6000/prometheus",
+                "backend": self.name,
+                "stop_command": f"cd {compose_dir} && {' '.join(docker_cmd)} down",
+            }
+        except subprocess.TimeoutExpired:
+            log.error("seldon_local_timeout")
+            return {"status": "failed", "error": "Docker command timed out"}
+        except Exception as exc:
+            log.error("seldon_local_error", error=str(exc))
+            return self._simulate_local_deploy()
 
     # ------------------------------------------------------------------
     # Code generation
@@ -318,3 +406,78 @@ output "monitoring_url" {
   value       = "http://${google_container_cluster.seldon_cluster.endpoint}:9090"
 }
 '''
+
+    # ------------------------------------------------------------------
+    # Local deployment helpers
+    # ------------------------------------------------------------------
+
+    def _render_local_compose(self, model_path: Path) -> str:
+        gpu = self.model_metadata.gpu_recommendation == "true"
+        gpu_block = ""
+        if gpu:
+            gpu_block = (
+                "    deploy:\n"
+                "      resources:\n"
+                "        reservations:\n"
+                "          devices:\n"
+                "            - driver: nvidia\n"
+                "              count: 1\n"
+                "              capabilities: [gpu]\n"
+            )
+        return f"""# Local Seldon Deployment — auto-generated by LaunchML
+# Usage:
+#   docker compose up --build        (foreground)
+#   docker compose up --build -d     (detached)
+#   docker compose down              (stop)
+
+services:
+  seldon-ml:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: launchml-seldon
+    ports:
+      - "5000:5000"    # REST prediction API
+      - "5001:5001"    # gRPC
+      - "6000:6000"    # Prometheus metrics
+    volumes:
+      - {model_path}:/mnt/models:ro
+    environment:
+      - MODEL_NAME=Model
+      - SERVICE_TYPE=MODEL
+      - PERSISTENCE=0
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+{gpu_block}"""
+
+    @staticmethod
+    def _resolve_docker_compose_cmd() -> list[str] | None:
+        """Return the docker compose CLI command, or None if unavailable."""
+        if shutil.which("docker"):
+            result = subprocess.run(
+                ["docker", "compose", "version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return ["docker", "compose"]
+        if shutil.which("docker-compose"):
+            return ["docker-compose"]
+        return None
+
+    @staticmethod
+    def _simulate_local_deploy() -> Dict[str, Any]:
+        """Return a simulated result when Docker is not available."""
+        return {
+            "status": "simulated_local",
+            "endpoint_url": "http://localhost:5000/predict",
+            "health_url": "http://localhost:5000/health/status",
+            "monitoring_url": "http://localhost:6000/prometheus",
+            "backend": "seldon",
+            "note": "Docker not available — simulated. Install Docker to deploy locally.",
+        }

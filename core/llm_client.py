@@ -147,20 +147,40 @@ class MockLLM:
 
         log.info("mock_llm_invoke", prompt_length=len(user_msg))
 
-        response_json = {
-            "selected_backend": "fastapi",
-            "reasoning": (
-                "For a small-to-medium model with moderate throughput requirements, "
-                "FastAPI provides the best balance of simplicity, flexibility, and "
-                "deployment speed. GPU is not strictly required for this model size, "
-                "and FastAPI allows easy horizontal scaling behind a load balancer."
-            ),
-            "instance_type": "n1-standard-4",
-            "gpu_type": "none",
-            "scaling_strategy": "horizontal_autoscaling",
-            "replicas_min": 1,
-            "replicas_max": 5,
-        }
+        # Detect local deployment mode from the prompt context
+        is_local = "LOCAL (Docker" in user_msg or "Cloud: local" in user_msg
+
+        if is_local:
+            response_json = {
+                "selected_backend": "fastapi",
+                "reasoning": (
+                    "For local development, FastAPI is the ideal choice. It provides "
+                    "a lightweight, fast-starting container with minimal resource "
+                    "requirements. The model can be mounted as a volume for rapid "
+                    "iteration without rebuilding the image. Prometheus metrics are "
+                    "available at /metrics for local observability."
+                ),
+                "instance_type": "local",
+                "gpu_type": "none",
+                "scaling_strategy": "single_container",
+                "replicas_min": 1,
+                "replicas_max": 1,
+            }
+        else:
+            response_json = {
+                "selected_backend": "fastapi",
+                "reasoning": (
+                    "For a small-to-medium model with moderate throughput requirements, "
+                    "FastAPI provides the best balance of simplicity, flexibility, and "
+                    "deployment speed. GPU is not strictly required for this model size, "
+                    "and FastAPI allows easy horizontal scaling behind a load balancer."
+                ),
+                "instance_type": "n1-standard-4",
+                "gpu_type": "none",
+                "scaling_strategy": "horizontal_autoscaling",
+                "replicas_min": 1,
+                "replicas_max": 5,
+            }
 
         class _Resp:
             content = json.dumps(response_json)

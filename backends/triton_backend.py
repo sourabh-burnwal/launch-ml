@@ -7,11 +7,15 @@ Best for:
     - Dynamic batching
     - ONNX / TensorRT / PyTorch TorchScript models
     - Production workloads requiring maximum GPU utilisation
+    - **Local deployment** via Docker Compose with Triton container
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any, Dict
 
 from backends.base import BackendCapabilities, DeploymentBackend
@@ -35,6 +39,7 @@ class TritonBackend(DeploymentBackend):
         supports_multi_model=True,
         supports_streaming=True,
         managed_service=False,
+        supports_local_deployment=True,
         max_model_size_gb=50.0,
         supported_frameworks=["pytorch", "tensorflow", "onnx", "transformers"],
         typical_latency_ms=10,
@@ -82,21 +87,96 @@ class TritonBackend(DeploymentBackend):
         }
 
     def setup_observability(self) -> Dict[str, str]:
+        is_local = self.config.deployment.is_local
         instructions: Dict[str, str] = {}
         if self.config.observability.enable_metrics:
-            instructions["metrics"] = (
-                "Triton exposes Prometheus metrics on port 8002.\n"
-                "Scrape target: <host>:8002/metrics\n"
-                "Key metrics: nv_inference_request_success, nv_inference_request_failure, "
-                "nv_inference_queue_duration_us, nv_gpu_utilization"
-            )
+            if is_local:
+                instructions["metrics"] = (
+                    "Triton exposes Prometheus metrics at http://localhost:8002/metrics\n"
+                    "Key metrics: nv_inference_request_success, nv_inference_request_failure, "
+                    "nv_inference_queue_duration_us, nv_gpu_utilization\n"
+                    "You can scrape this with a local Prometheus instance."
+                )
+            else:
+                instructions["metrics"] = (
+                    "Triton exposes Prometheus metrics on port 8002.\n"
+                    "Scrape target: <host>:8002/metrics\n"
+                    "Key metrics: nv_inference_request_success, nv_inference_request_failure, "
+                    "nv_inference_queue_duration_us, nv_gpu_utilization"
+                )
         if self.config.observability.enable_logging:
-            instructions["logging"] = (
-                "Triton logs to stdout in structured format.\n"
-                "Set --log-verbose=1 for detailed request logs.\n"
-                "Integrate with Cloud Logging or Fluentd."
-            )
+            if is_local:
+                instructions["logging"] = (
+                    "Triton logs stream to stdout (visible via docker compose logs).\n"
+                    "Run: docker compose -f generated/serving_code/docker-compose.yaml logs -f\n"
+                    "Verbose logging enabled (--log-verbose=1)."
+                )
+            else:
+                instructions["logging"] = (
+                    "Triton logs to stdout in structured format.\n"
+                    "Set --log-verbose=1 for detailed request logs.\n"
+                    "Integrate with Cloud Logging or Fluentd."
+                )
         return instructions
+
+    # ------------------------------------------------------------------
+    # Local deployment
+    # ------------------------------------------------------------------
+
+    def generate_local_compose(self) -> Dict[str, str]:
+        """Generate docker-compose.yaml for local Triton serving."""
+        self.ensure_dirs()
+        model_path = Path(self.model_metadata.model_path).resolve()
+        files = {
+            "docker-compose.yaml": self._render_local_compose(model_path),
+        }
+        written = self.write_files(self.serving_dir, files)
+        log.info("triton_local_compose_generated", files=written)
+        return files
+
+    def deploy_local(self) -> Dict[str, Any]:
+        """Pull Triton image and start container locally."""
+        log.info("triton_local_deploy_start")
+        compose_dir = self.serving_dir.resolve()
+        compose_file = compose_dir / "docker-compose.yaml"
+
+        if not compose_file.is_file():
+            log.error("triton_compose_missing", path=str(compose_file))
+            return {"status": "failed", "error": "docker-compose.yaml not found"}
+
+        docker_cmd = self._resolve_docker_compose_cmd()
+        if docker_cmd is None:
+            log.warning("docker_compose_not_found", msg="Simulating local deployment")
+            return self._simulate_local_deploy()
+
+        try:
+            subprocess.run(
+                [*docker_cmd, "down", "--remove-orphans"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=60,
+            )
+            log.info("triton_local_up")
+            up = subprocess.run(
+                [*docker_cmd, "up", "-d"],
+                cwd=compose_dir, capture_output=True, text=True, timeout=300,
+            )
+            if up.returncode != 0:
+                log.error("triton_local_up_failed", stderr=up.stderr[:500])
+                return {"status": "failed", "error": up.stderr[:500]}
+
+            return {
+                "status": "running_locally",
+                "endpoint_url": "http://localhost:8000/v2/models/model/infer",
+                "grpc_url": "localhost:8001",
+                "monitoring_url": "http://localhost:8002/metrics",
+                "backend": self.name,
+                "stop_command": f"cd {compose_dir} && {' '.join(docker_cmd)} down",
+            }
+        except subprocess.TimeoutExpired:
+            log.error("triton_local_timeout")
+            return {"status": "failed", "error": "Docker command timed out"}
+        except Exception as exc:
+            log.error("triton_local_error", error=str(exc))
+            return self._simulate_local_deploy()
 
     # ------------------------------------------------------------------
     # Code generation
@@ -321,3 +401,73 @@ output "monitoring_url" {
   value       = "http://${google_compute_global_address.triton_ip.address}:8002/metrics"
 }
 '''
+
+    # ------------------------------------------------------------------
+    # Local deployment helpers
+    # ------------------------------------------------------------------
+
+    def _render_local_compose(self, model_path: Path) -> str:
+        model_repo = self.serving_dir.resolve() / "model_repository"
+        return f"""# Local Triton Deployment — auto-generated by LaunchML
+# Usage:
+#   docker compose up        (foreground)
+#   docker compose up -d     (detached)
+#   docker compose down      (stop)
+
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: launchml-triton
+    ports:
+      - "8000:8000"   # HTTP inference
+      - "8001:8001"   # gRPC inference
+      - "8002:8002"   # Prometheus metrics
+    volumes:
+      - {model_repo}:/models:ro
+    command: >
+      tritonserver
+        --model-repository=/models
+        --strict-model-config=false
+        --log-verbose=1
+        --metrics-port=8002
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+"""
+
+    @staticmethod
+    def _resolve_docker_compose_cmd() -> list[str] | None:
+        """Return the docker compose CLI command, or None if unavailable."""
+        if shutil.which("docker"):
+            result = subprocess.run(
+                ["docker", "compose", "version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return ["docker", "compose"]
+        if shutil.which("docker-compose"):
+            return ["docker-compose"]
+        return None
+
+    @staticmethod
+    def _simulate_local_deploy() -> Dict[str, Any]:
+        """Return a simulated result when Docker is not available."""
+        return {
+            "status": "simulated_local",
+            "endpoint_url": "http://localhost:8000/v2/models/model/infer",
+            "grpc_url": "localhost:8001",
+            "monitoring_url": "http://localhost:8002/metrics",
+            "backend": "triton",
+            "note": "Docker not available — simulated. Install Docker to deploy locally.",
+        }
