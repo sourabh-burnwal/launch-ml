@@ -9,6 +9,9 @@ Detection heuristics:
     3. Directory structure conventions (``saved_model/``, ``variables/``)
     4. Model size estimation (sum of artefact file sizes)
     5. GPU need heuristic based on size + framework
+    6. Entrypoint import scanning — detects framework when only a
+       ``predict.py`` is present (e.g. models fetched from
+       torchvision / HuggingFace Hub at runtime).
 
 The output is a ``ModelMetadata`` dataclass that flows through the rest
 of the pipeline.
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -36,6 +40,19 @@ _FRAMEWORK_EXTENSIONS: dict[str, list[str]] = {
 }
 
 _HF_MARKER_FILES = {"config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"}
+
+# Patterns matched against import lines in a custom entrypoint.
+# Order matters: later entries can override earlier ones when both match.
+_ENTRYPOINT_IMPORT_PATTERNS: list[tuple[str, str]] = [
+    (r"\btorch\b", "pytorch"),
+    (r"\btorchvision\b", "pytorch"),
+    (r"\btensorflow\b", "tensorflow"),
+    (r"\bkeras\b", "tensorflow"),
+    (r"\bonnxruntime\b", "onnx"),
+    (r"\btransformers\b", "transformers"),
+    (r"\bhuggingface_hub\b", "transformers"),
+    (r"\bdiffusers\b", "transformers"),
+]
 
 _SIZE_THRESHOLDS_MB = {
     "small": 100,      # < 100 MB
@@ -59,6 +76,7 @@ class ModelMetadata:
     has_config_json: bool = False
     has_custom_entrypoint: bool = False
     entrypoint_path: Optional[str] = None
+    runtime_download: bool = False              # True when weights are fetched at startup (no local artefacts)
     gpu_recommendation: str = "auto"            # true | false | auto
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -74,6 +92,7 @@ class ModelMetadata:
             "has_config_json": self.has_config_json,
             "has_custom_entrypoint": self.has_custom_entrypoint,
             "entrypoint_path": self.entrypoint_path,
+            "runtime_download": self.runtime_download,
             "gpu_recommendation": self.gpu_recommendation,
             "extra": self.extra,
         }
@@ -106,11 +125,38 @@ class ModelAnalyzer:
         has_tok = self._has_tokenizer(all_files)
         has_cfg = self._has_config_json(all_files)
         has_entry, entry_path = self._check_entrypoint()
-        gpu_rec = self._gpu_heuristic(framework, total_mb)
+
+        # ── Runtime-download detection ────────────────────────────────
+        # If we have a custom entrypoint but *no* model weight files,
+        # the user likely downloads from torchvision / HuggingFace Hub
+        # / a remote registry at startup time.
+        is_runtime_download = has_entry and len(model_files) == 0
+
+        # When no model files exist, try to infer the framework by
+        # scanning import statements in the entrypoint.
+        if framework == "unknown" and entry_path:
+            scanned_fw = self._detect_framework_from_entrypoint(entry_path)
+            if scanned_fw != "unknown":
+                log.info(
+                    "framework_from_entrypoint",
+                    framework=scanned_fw,
+                    entrypoint=entry_path,
+                )
+                framework = scanned_fw
+
+        gpu_rec = self._gpu_heuristic(
+            framework, total_mb, runtime_download=is_runtime_download,
+        )
 
         extra: Dict[str, Any] = {}
         if has_cfg:
             extra["config_json"] = self._read_config_json()
+        if is_runtime_download:
+            extra["note"] = (
+                "No model weight files found. The custom entrypoint is "
+                "expected to download/initialise the model at startup "
+                "(e.g. from torchvision, HuggingFace Hub, etc.)."
+            )
 
         meta = ModelMetadata(
             model_path=str(self.model_path),
@@ -122,6 +168,7 @@ class ModelAnalyzer:
             has_config_json=has_cfg,
             has_custom_entrypoint=has_entry,
             entrypoint_path=entry_path,
+            runtime_download=is_runtime_download,
             gpu_recommendation=gpu_rec,
             extra=extra,
         )
@@ -130,6 +177,7 @@ class ModelAnalyzer:
             framework=framework,
             size_mb=round(total_mb, 1),
             gpu=gpu_rec,
+            runtime_download=is_runtime_download,
         )
         return meta
 
@@ -213,8 +261,51 @@ class ModelAnalyzer:
             return True, str(ep2.resolve())
         return False, None
 
-    def _gpu_heuristic(self, framework: str, size_mb: float) -> str:
-        """Simple heuristic: large models almost always need GPU."""
+    def _detect_framework_from_entrypoint(self, entrypoint_path: str) -> str:
+        """Scan import lines in the entrypoint to infer the ML framework.
+
+        This handles the common case where no model weight files exist
+        because the user downloads from torchvision, HuggingFace Hub, etc.
+        """
+        try:
+            source = Path(entrypoint_path).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return "unknown"
+
+        # Collect only import lines (handles both ``import X`` and ``from X import ...``)
+        import_lines = [
+            line for line in source.splitlines()
+            if re.match(r"^\s*(import |from )", line)
+        ]
+        if not import_lines:
+            return "unknown"
+
+        import_block = "\n".join(import_lines)
+        votes: dict[str, int] = {}
+        for pattern, fw in _ENTRYPOINT_IMPORT_PATTERNS:
+            if re.search(pattern, import_block):
+                votes[fw] = votes.get(fw, 0) + 1
+
+        if not votes:
+            return "unknown"
+
+        # transformers > pytorch when both present (HuggingFace wraps torch)
+        if "transformers" in votes and "pytorch" in votes:
+            return "transformers"
+        return max(votes, key=lambda k: votes[k])
+
+    def _gpu_heuristic(
+        self, framework: str, size_mb: float, *, runtime_download: bool = False,
+    ) -> str:
+        """Heuristic for GPU need.
+
+        When ``runtime_download`` is True the weights aren't on disk so
+        we can't judge by file size — default to ``"auto"`` and let the
+        LLM / user decide.
+        """
+        if runtime_download:
+            # Can't judge size; GPU is likely but not certain.
+            return "auto"
         if size_mb > 500:
             return "true"
         if framework in ("transformers",) and size_mb > 100:
