@@ -425,6 +425,7 @@ def _dict_to_metadata(d: Dict[str, Any]) -> ModelMetadata:
         has_custom_entrypoint=d.get("has_custom_entrypoint", False),
         entrypoint_path=d.get("entrypoint_path"),
         runtime_download=d.get("runtime_download", False),
+        entrypoint_dependencies=d.get("entrypoint_dependencies", []),
         gpu_recommendation=d.get("gpu_recommendation", "auto"),
         extra=d.get("extra", {}),
     )

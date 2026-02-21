@@ -54,6 +54,34 @@ _ENTRYPOINT_IMPORT_PATTERNS: list[tuple[str, str]] = [
     (r"\bdiffusers\b", "transformers"),
 ]
 
+# Mapping from Python import names to pip package names.
+# Used to auto-generate requirements.txt from the user's entrypoint.
+_IMPORT_TO_PIP: dict[str, str] = {
+    "torch": "torch",
+    "torchvision": "torchvision",
+    "torchaudio": "torchaudio",
+    "tensorflow": "tensorflow",
+    "keras": "keras",
+    "onnxruntime": "onnxruntime",
+    "PIL": "Pillow",
+    "cv2": "opencv-python",
+    "sklearn": "scikit-learn",
+    "skimage": "scikit-image",
+    "yaml": "PyYAML",
+    "requests": "requests",
+    "numpy": "numpy",
+    "pandas": "pandas",
+    "scipy": "scipy",
+    "transformers": "transformers",
+    "huggingface_hub": "huggingface-hub",
+    "diffusers": "diffusers",
+    "accelerate": "accelerate",
+    "safetensors": "safetensors",
+    "tokenizers": "tokenizers",
+    "datasets": "datasets",
+    "einops": "einops",
+}
+
 _SIZE_THRESHOLDS_MB = {
     "small": 100,      # < 100 MB
     "medium": 1_000,   # < 1 GB
@@ -77,6 +105,7 @@ class ModelMetadata:
     has_custom_entrypoint: bool = False
     entrypoint_path: Optional[str] = None
     runtime_download: bool = False              # True when weights are fetched at startup (no local artefacts)
+    entrypoint_dependencies: List[str] = field(default_factory=list)  # pip package names
     gpu_recommendation: str = "auto"            # true | false | auto
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -93,6 +122,7 @@ class ModelMetadata:
             "has_custom_entrypoint": self.has_custom_entrypoint,
             "entrypoint_path": self.entrypoint_path,
             "runtime_download": self.runtime_download,
+            "entrypoint_dependencies": self.entrypoint_dependencies,
             "gpu_recommendation": self.gpu_recommendation,
             "extra": self.extra,
         }
@@ -148,6 +178,13 @@ class ModelAnalyzer:
             framework, total_mb, runtime_download=is_runtime_download,
         )
 
+        # Scan entrypoint for pip dependencies
+        ep_deps: List[str] = []
+        if entry_path:
+            ep_deps = self._scan_entrypoint_dependencies(entry_path)
+            if ep_deps:
+                log.info("entrypoint_deps", deps=ep_deps, entrypoint=entry_path)
+
         extra: Dict[str, Any] = {}
         if has_cfg:
             extra["config_json"] = self._read_config_json()
@@ -169,6 +206,7 @@ class ModelAnalyzer:
             has_custom_entrypoint=has_entry,
             entrypoint_path=entry_path,
             runtime_download=is_runtime_download,
+            entrypoint_dependencies=ep_deps,
             gpu_recommendation=gpu_rec,
             extra=extra,
         )
@@ -313,6 +351,36 @@ class ModelAnalyzer:
         if size_mb < 50:
             return "false"
         return "auto"
+
+    def _scan_entrypoint_dependencies(self, entrypoint_path: str) -> List[str]:
+        """Extract pip package names from the import statements of the entrypoint.
+
+        Only packages present in ``_IMPORT_TO_PIP`` are returned — standard-library
+        modules (``sys``, ``os``, ``io``, …) are silently ignored.
+        """
+        try:
+            source = Path(entrypoint_path).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return []
+
+        pip_pkgs: set[str] = set()
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("import "):
+                # import torch, numpy  →  ["torch", "numpy"]
+                modules = stripped[len("import "):].split(",")
+                for mod in modules:
+                    top = mod.strip().split(".")[0].split(" ")[0]
+                    if top in _IMPORT_TO_PIP:
+                        pip_pkgs.add(_IMPORT_TO_PIP[top])
+            elif stripped.startswith("from "):
+                # from torchvision import models  →  "torchvision"
+                parts = stripped[len("from "):].split()
+                if parts:
+                    top = parts[0].split(".")[0]
+                    if top in _IMPORT_TO_PIP:
+                        pip_pkgs.add(_IMPORT_TO_PIP[top])
+        return sorted(pip_pkgs)
 
     def _read_config_json(self) -> Dict[str, Any]:
         """Best-effort read of HuggingFace config.json."""
