@@ -10,9 +10,10 @@ Architecture:
       (see ``registry.py``).
 
 Extensibility:
-    To add a new backend, create a file ``backends/my_backend.py``, subclass
-    ``DeploymentBackend``, and decorate the class with ``@register_backend``.
-    That's it — the agent will automatically discover it.
+    To add a new backend, create a file ``launchml/backends/my_backend.py``,
+    subclass ``DeploymentBackend``, and decorate the class with
+    ``@register_backend``.  That's it — the agent will automatically
+    discover it.
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from core.config_loader import DeployConfig
-from core.model_analyzer import ModelMetadata
+from launchml.core.config_loader import DeployConfig
+from launchml.core.model_analyzer import ModelMetadata
 
 
 @dataclass
@@ -54,7 +55,7 @@ class DeploymentBackend(ABC):
     Lifecycle (called in order by the agent graph):
         1. ``validate``          — can this backend handle this model + config?
         2. ``generate_inference_code`` — emit serving code (FastAPI app, Triton config, …)
-        3. ``generate_terraform``      — emit IaC under ``generated/terraform/``
+        3. ``generate_terraform``      — emit IaC under ``<output_dir>/terraform/``
         4. ``deploy``                  — orchestrate the actual deployment
         5. ``setup_observability``     — wire metrics / logging
     """
@@ -64,12 +65,17 @@ class DeploymentBackend(ABC):
     description: str = ""
     capabilities: BackendCapabilities = BackendCapabilities()
 
-    def __init__(self, config: DeployConfig, model_metadata: ModelMetadata) -> None:
+    def __init__(
+        self,
+        config: DeployConfig,
+        model_metadata: ModelMetadata,
+        output_dir: str | Path = "output",
+    ) -> None:
         self.config = config
         self.model_metadata = model_metadata
-        self.generated_dir = Path("generated")
-        self.terraform_dir = self.generated_dir / "terraform"
-        self.serving_dir = self.generated_dir / "serving_code"
+        self.output_dir = Path(output_dir).resolve()
+        self.terraform_dir = self.output_dir / "terraform"
+        self.serving_dir = self.output_dir / "serving_code"
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -86,7 +92,7 @@ class DeploymentBackend(ABC):
 
         Returns:
             Mapping of ``filename -> contents`` that will be written under
-            ``generated/serving_code/``.
+            ``<output_dir>/serving_code/``.
         """
         ...
 
@@ -96,7 +102,7 @@ class DeploymentBackend(ABC):
 
         Returns:
             Mapping of ``filename -> contents`` that will be written under
-            ``generated/terraform/``.
+            ``<output_dir>/terraform/``.
         """
         ...
 
@@ -130,7 +136,7 @@ class DeploymentBackend(ABC):
 
         Returns:
             Mapping of ``filename -> contents`` written under
-            ``generated/serving_code/``.
+            ``<output_dir>/serving_code/``.
         """
         raise NotImplementedError(
             f"Backend '{self.name}' does not support local deployment."

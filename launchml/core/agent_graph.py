@@ -54,13 +54,13 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from backends.base import DeploymentBackend
-from backends.registry import discover_backends, get_backend, list_backends
-from core.config_loader import DeployConfig
-from core.llm_client import create_llm_or_mock, invoke_llm
-from core.model_analyzer import ModelAnalyzer, ModelMetadata
-from utils.logger import get_logger, step, success, info, warn, error as cli_error
-from utils.terraform_runner import TerraformRunner
+from launchml.backends.base import DeploymentBackend
+from launchml.backends.registry import discover_backends, get_backend, list_backends
+from launchml.core.config_loader import DeployConfig
+from launchml.core.llm_client import create_llm_or_mock, invoke_llm
+from launchml.core.model_analyzer import ModelAnalyzer, ModelMetadata
+from launchml.utils.logger import get_logger, step, success, info, warn, error as cli_error
+from launchml.utils.terraform_runner import TerraformRunner
 
 log = get_logger(__name__)
 
@@ -71,6 +71,7 @@ class PipelineState(TypedDict, total=False):
     """Typed state dictionary flowing through the LangGraph."""
     # Inputs
     config: Dict[str, Any]
+    output_dir: str
 
     # Node 1 outputs
     model_metadata: Dict[str, Any]
@@ -154,7 +155,7 @@ def node_strategy_agent(state: PipelineState) -> PipelineState:
                     f"proceeding anyway (may require manual adjustments)."
                 )
             else:
-                from backends.registry import registered_names
+                from launchml.backends.registry import registered_names
                 cli_error(
                     f"Unknown backend '{forced_backend}'. "
                     f"Available: {registered_names()}"
@@ -248,7 +249,7 @@ Select the best backend and explain your reasoning considering:
 6. Framework compatibility with {metadata.get('detected_framework', 'unknown')}"""
 
     # Create LLM and invoke
-    from core.config_loader import LLMConfig
+    from launchml.core.config_loader import LLMConfig
     llm_config = LLMConfig(**config_dict.get("llm", {}))
     llm = create_llm_or_mock(llm_config)
     decision = invoke_llm(llm, system_prompt=system_prompt, user_prompt=user_prompt)
@@ -281,6 +282,11 @@ Select the best backend and explain your reasoning considering:
     }
 
 
+def _get_output_dir(state: PipelineState) -> str:
+    """Extract the output directory from pipeline state."""
+    return state.get("output_dir", "output")
+
+
 def node_backend_plugin(state: PipelineState) -> PipelineState:
     """Node 3: Execute the selected backend plugin to generate code + IaC/compose."""
     config_dict = state["config"]
@@ -288,6 +294,7 @@ def node_backend_plugin(state: PipelineState) -> PipelineState:
     decision = state["strategy_decision"]
     selected = decision.get("selected_backend", "fastapi")
     is_local = config_dict.get("deployment", {}).get("cloud") == "local"
+    output_dir = _get_output_dir(state)
 
     if is_local:
         step("Node 3 — Generating inference code and Docker Compose (local mode)")
@@ -298,12 +305,12 @@ def node_backend_plugin(state: PipelineState) -> PipelineState:
     config = DeployConfig(**config_dict)
     metadata = _dict_to_metadata(metadata_dict)
 
-    backend = get_backend(selected, config, metadata)
+    backend = get_backend(selected, config, metadata, output_dir=output_dir)
 
     # Validate
     if not backend.validate():
         warn(f"Backend '{selected}' validation failed, falling back to 'fastapi'")
-        backend = get_backend("fastapi", config, metadata)
+        backend = get_backend("fastapi", config, metadata, output_dir=output_dir)
 
     # Generate inference code
     serving_files = backend.generate_inference_code()
@@ -333,10 +340,11 @@ def node_deploy_executor(state: PipelineState) -> PipelineState:
     decision = state["strategy_decision"]
     selected = decision.get("selected_backend", "fastapi")
     is_local = config_dict.get("deployment", {}).get("cloud") == "local"
+    output_dir = _get_output_dir(state)
 
     config = DeployConfig(**config_dict)
     metadata = _dict_to_metadata(state["model_metadata"])
-    backend = get_backend(selected, config, metadata)
+    backend = get_backend(selected, config, metadata, output_dir=output_dir)
 
     if is_local:
         step("Node 5 — Deploying locally via Docker")
@@ -350,7 +358,7 @@ def node_deploy_executor(state: PipelineState) -> PipelineState:
     else:
         step("Node 5 — Deploying infrastructure via Terraform")
 
-        terraform_dir = Path("generated/terraform")
+        terraform_dir = Path(output_dir) / "terraform"
 
         # Use TerraformRunner (auto-simulates if CLI not available)
         runner = TerraformRunner(terraform_dir, simulate=True)  # POC: always simulate
@@ -382,14 +390,16 @@ def node_observability(state: PipelineState) -> PipelineState:
     decision = state["strategy_decision"]
     selected = decision.get("selected_backend", "fastapi")
     deploy_result = state.get("deployment_result", {})
+    output_dir = _get_output_dir(state)
 
     config = DeployConfig(**config_dict)
     metadata = _dict_to_metadata(state["model_metadata"])
-    backend = get_backend(selected, config, metadata)
+    backend = get_backend(selected, config, metadata, output_dir=output_dir)
 
     obs_instructions = backend.setup_observability()
 
     # Generate deployment summary
+    output_path = Path(output_dir)
     summary = _generate_summary(
         config_dict=config_dict,
         metadata=state["model_metadata"],
@@ -397,10 +407,11 @@ def node_observability(state: PipelineState) -> PipelineState:
         reasoning=state.get("strategy_reasoning", ""),
         deploy_result=deploy_result,
         obs_instructions=obs_instructions,
+        output_dir=str(output_path),
     )
 
     # Write summary to disk
-    summary_path = Path("generated/DEPLOYMENT_SUMMARY.md")
+    summary_path = output_path / "DEPLOYMENT_SUMMARY.md"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(summary)
     success(f"Deployment summary written to {summary_path}")
@@ -439,11 +450,12 @@ def build_graph() -> StateGraph:
     return graph.compile()
 
 
-def run_pipeline(config: DeployConfig) -> PipelineState:
+def run_pipeline(config: DeployConfig, *, output_dir: str = "output") -> PipelineState:
     """High-level entry: build graph, seed state, and run.
 
     Args:
         config: Validated deployment configuration.
+        output_dir: Path to the output directory for generated artefacts.
 
     Returns:
         Final pipeline state with all outputs.
@@ -454,11 +466,12 @@ def run_pipeline(config: DeployConfig) -> PipelineState:
     # Build initial state — serialise config to dict for state transport
     initial_state: PipelineState = {
         "config": config.model_dump(),
+        "output_dir": str(Path(output_dir).resolve()),
         "errors": [],
     }
 
     compiled = build_graph()
-    log.info("pipeline_start")
+    log.info("pipeline_start", output_dir=output_dir)
 
     final_state = compiled.invoke(initial_state)
 
@@ -495,6 +508,7 @@ def _generate_summary(
     reasoning: str,
     deploy_result: Dict[str, Any],
     obs_instructions: Dict[str, str],
+    output_dir: str = "output",
 ) -> str:
     """Generate the DEPLOYMENT_SUMMARY.md content."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -515,45 +529,45 @@ def _generate_summary(
 
 ```bash
 # Re-run the full pipeline
-python deploy.py --config deploy_config.yaml
+launch-ml --model-dir <MODEL_DIR> --config deploy_config.yaml --output-dir {output_dir}
 
 # Or rebuild and restart containers manually
-cd generated/serving_code
+cd {output_dir}/serving_code
 docker compose up --build -d
 ```
 
 ## 💥 How to Stop Local Containers
 
 ```bash
-{stop_cmd if stop_cmd else "cd generated/serving_code && docker compose down"}
+{stop_cmd if stop_cmd else f"cd {output_dir}/serving_code && docker compose down"}
 ```"""
-        files_section = """## 📁 Generated Files
+        files_section = f"""## 📁 Generated Files
 
-- `generated/serving_code/` — Inference server code + docker-compose.yaml
-- `generated/DEPLOYMENT_SUMMARY.md` — This file"""
+- `{output_dir}/serving_code/` — Inference server code + docker-compose.yaml
+- `{output_dir}/DEPLOYMENT_SUMMARY.md` — This file"""
     else:
-        redeploy_section = """## 🔄 How to Redeploy
+        redeploy_section = f"""## 🔄 How to Redeploy
 
 ```bash
 # Re-run the full pipeline
-python deploy.py --config deploy_config.yaml
+launch-ml --model-dir <MODEL_DIR> --config deploy_config.yaml --output-dir {output_dir}
 
 # Or apply Terraform changes only
-cd generated/terraform
+cd {output_dir}/terraform
 terraform apply
 ```
 
 ## 💥 How to Destroy Infrastructure
 
 ```bash
-cd generated/terraform
+cd {output_dir}/terraform
 terraform destroy
 ```"""
-        files_section = """## 📁 Generated Files
+        files_section = f"""## 📁 Generated Files
 
-- `generated/serving_code/` — Inference server code
-- `generated/terraform/` — Infrastructure as Code
-- `generated/DEPLOYMENT_SUMMARY.md` — This file"""
+- `{output_dir}/serving_code/` — Inference server code
+- `{output_dir}/terraform/` — Infrastructure as Code
+- `{output_dir}/DEPLOYMENT_SUMMARY.md` — This file"""
 
     return f"""# LaunchML — Deployment Summary
 

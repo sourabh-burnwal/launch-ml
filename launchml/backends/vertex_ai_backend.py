@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from backends.base import BackendCapabilities, DeploymentBackend
-from backends.registry import register_backend
-from utils.logger import get_logger
+from launchml.backends.base import BackendCapabilities, DeploymentBackend
+from launchml.backends.registry import register_backend
+from launchml.utils.logger import get_logger
 
 log = get_logger(__name__)
 

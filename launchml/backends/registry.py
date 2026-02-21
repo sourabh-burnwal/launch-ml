@@ -6,33 +6,35 @@ Architecture:
       decorator.
     - At import time the registry is populated; the agent graph calls
       ``get_all_backends()`` to enumerate capabilities.
-    - ``get_backend(name, config, metadata)`` instantiates a backend by name.
+    - ``get_backend(name, config, metadata, output_dir)`` instantiates a
+      backend by name.
 
 Extensibility:
     Adding a backend is as simple as:
 
-        # backends/my_new_backend.py
-        from backends.base import DeploymentBackend, BackendCapabilities
-        from backends.registry import register_backend
+        # launchml/backends/my_new_backend.py
+        from launchml.backends.base import DeploymentBackend, BackendCapabilities
+        from launchml.backends.registry import register_backend
 
         @register_backend
         class MyNewBackend(DeploymentBackend):
             name = "my_new"
             ...
 
-    Then add an import in ``backends/__init__.py`` so it is picked up.
+    The agent will automatically discover it.
 """
 
 from __future__ import annotations
 
 import importlib
 import pkgutil
+from pathlib import Path
 from typing import Any, Dict, Type
 
-from backends.base import DeploymentBackend
-from core.config_loader import DeployConfig
-from core.model_analyzer import ModelMetadata
-from utils.logger import get_logger
+from launchml.backends.base import DeploymentBackend
+from launchml.core.config_loader import DeployConfig
+from launchml.core.model_analyzer import ModelMetadata
+from launchml.utils.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -58,12 +60,12 @@ def discover_backends() -> None:
 
     This is called once at startup.
     """
-    import backends as _pkg
+    import launchml.backends as _pkg
 
     for _importer, modname, _ispkg in pkgutil.iter_modules(_pkg.__path__):
         if modname in ("base", "registry", "__init__"):
             continue
-        importlib.import_module(f"backends.{modname}")
+        importlib.import_module(f"launchml.backends.{modname}")
     log.info("backends_discovered", count=len(_REGISTRY), names=list(_REGISTRY.keys()))
 
 
@@ -102,6 +104,7 @@ def get_backend(
     name: str,
     config: DeployConfig,
     model_metadata: ModelMetadata,
+    output_dir: str | Path = "output",
 ) -> DeploymentBackend:
     """Instantiate and return a backend by *name*.
 
@@ -113,7 +116,7 @@ def get_backend(
             f"Backend '{name}' not found. Available: {list(_REGISTRY.keys())}"
         )
     cls = _REGISTRY[name]
-    return cls(config=config, model_metadata=model_metadata)
+    return cls(config=config, model_metadata=model_metadata, output_dir=output_dir)
 
 
 def registered_names() -> list[str]:

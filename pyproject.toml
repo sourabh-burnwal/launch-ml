@@ -44,11 +44,14 @@ Issues = "https://github.com/your-org/launch-ml/issues"
 Changelog = "https://github.com/your-org/launch-ml/blob/main/CHANGELOG.md"
 
 [project.scripts]
-launch-ml = "deploy:main"
+launch-ml = "launchml.cli:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["core*", "backends*", "utils*", "templates*"]
+include = ["launchml*"]
+
+[tool.setuptools.package-data]
+launchml = ["templates/**/*"]

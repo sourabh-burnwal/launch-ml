@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utils.logger import get_logger
+from launchml.utils.logger import get_logger
 
 log = get_logger(__name__)
 

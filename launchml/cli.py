@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-LaunchML — deploy.py
-=====================
+LaunchML — CLI Entrypoint
+==========================
 
 Production-quality CLI entrypoint that:
   1. Loads and validates deploy_config.yaml
   2. Runs the LangGraph agent pipeline
   3. Outputs a working deployed endpoint + summary
 
-Usage:
-    python deploy.py --config deploy_config.yaml
-    python deploy.py --config deploy_config.yaml --dry-run
-    python deploy.py --config deploy_config.yaml --json-logs
+Usage (after ``pip install .``):
+    launch-ml --model-dir ./my_model --config deploy_config.yaml --output-dir ./output
+    launch-ml --model-dir ./my_model --config deploy_config.yaml --output-dir ./output --dry-run
+    launch-ml --model-dir ./my_model --config deploy_config.yaml --output-dir ./output --backend fastapi
 
 Environment Variables:
     OPENAI_API_KEY      — Required if llm.provider = openai
@@ -20,7 +20,7 @@ Environment Variables:
 
 Architecture:
     This file is deliberately thin — it handles CLI parsing and
-    delegates everything to ``core.agent_graph.run_pipeline()``.
+    delegates everything to ``launchml.core.agent_graph.run_pipeline()``.
 """
 
 from __future__ import annotations
@@ -32,12 +32,7 @@ from pathlib import Path
 import click
 from dotenv import load_dotenv
 
-# Ensure project root is on sys.path for imports
-PROJECT_ROOT = Path(__file__).parent.resolve()
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from utils.logger import (
+from launchml.utils.logger import (
     configure_logging,
     console,
     step,
@@ -51,11 +46,25 @@ from utils.logger import (
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
+    "--model-dir",
+    "model_dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, resolve_path=True),
+    help="Path to the model directory containing artefacts and/or predict.py.",
+)
+@click.option(
     "--config",
     "config_path",
     required=True,
-    type=click.Path(exists=True),
-    help="Path to deploy_config.yaml",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    help="Path to deploy_config.yaml.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    required=True,
+    type=click.Path(resolve_path=True),
+    help="Path to the output directory for generated serving code, Terraform, and summaries.",
 )
 @click.option(
     "--dry-run",
@@ -85,13 +94,26 @@ from utils.logger import (
     help="Enable verbose (DEBUG) logging.",
 )
 def main(
+    model_dir: str,
     config_path: str,
+    output_dir: str,
     dry_run: bool,
     json_logs: bool,
     backend: str | None,
     verbose: bool,
 ) -> None:
-    """LaunchML — Analyze, reason, and deploy ML models with AI."""
+    """🚀 LaunchML — Analyze, reason, and deploy ML models with AI.
+
+    Reads your model directory, uses an AI agent to pick the best serving
+    backend, generates production-ready inference code and infrastructure,
+    and deploys it — all in one command.
+
+    \b
+    Example:
+        launch-ml --model-dir ./my_model \\
+                  --config deploy_config.yaml \\
+                  --output-dir ./output
+    """
 
     # ── 0. Setup ──────────────────────────────────────────────────────────
     load_dotenv()  # load .env if present (never committed)
@@ -107,28 +129,40 @@ def main(
 
     # ── 1. Load config ────────────────────────────────────────────────────
     step("Loading configuration")
-    from core.config_loader import load_config
+    from launchml.core.config_loader import load_config, DeployConfig
+
     config = load_config(config_path)
+
+    # Override model.path with --model-dir CLI argument
+    config_dict = config.model_dump()
+    config_dict["model"]["path"] = model_dir
 
     # CLI --backend flag overrides YAML config
     if backend and backend.lower() != "auto":
-        # Pydantic model is frozen, so we rebuild with the override
-        config_dict = config.model_dump()
         config_dict["deployment"]["backend"] = backend.lower()
-        from core.config_loader import DeployConfig
-        config = DeployConfig(**config_dict)
         info(f"Backend override (CLI): {backend}")
+
+    # Rebuild the immutable config with overrides applied
+    config = DeployConfig(**config_dict)
+
+    # Validate model directory
+    model_path = Path(model_dir)
+    if not model_path.is_dir():
+        cli_error(f"Model directory does not exist: {model_path}")
+        raise SystemExit(1)
 
     deploy_mode = "LOCAL (Docker)" if config.deployment.is_local else f"CLOUD ({config.deployment.cloud})"
     backend_info = f"  |  Backend: {config.deployment.backend}" if config.deployment.has_backend_override else ""
+    info(f"Model directory: {model_dir}")
+    info(f"Output directory: {output_dir}")
     info(f"Deploy mode: {deploy_mode}  |  Region: {config.deployment.region}{backend_info}")
     info(f"LLM: {config.llm.provider}/{config.llm.model}")
 
     # ── 2. Run pipeline ───────────────────────────────────────────────────
-    from core.agent_graph import run_pipeline
+    from launchml.core.agent_graph import run_pipeline
 
     try:
-        final_state = run_pipeline(config)
+        final_state = run_pipeline(config, output_dir=output_dir)
     except KeyboardInterrupt:
         cli_error("Pipeline interrupted by user.")
         raise SystemExit(130)
@@ -140,7 +174,7 @@ def main(
 
     # ── 3. Print results ──────────────────────────────────────────────────
     elapsed = time.time() - start_time
-    _print_results(final_state, elapsed, dry_run)
+    _print_results(final_state, elapsed, dry_run, output_dir)
 
 
 # ─── Pretty output helpers ────────────────────────────────────────────────────
@@ -156,7 +190,7 @@ def _print_banner() -> None:
     )
 
 
-def _print_results(state: dict, elapsed: float, dry_run: bool) -> None:
+def _print_results(state: dict, elapsed: float, dry_run: bool, output_dir: str) -> None:
     console.print("\n[bold]" + "═" * 62 + "[/bold]")
     console.print("[bold green]  ✅  Pipeline Complete[/bold green]")
     console.print("[bold]" + "═" * 62 + "[/bold]\n")
@@ -201,7 +235,7 @@ def _print_results(state: dict, elapsed: float, dry_run: bool) -> None:
 
     console.print()
     console.print(f"  [dim]Time elapsed: {elapsed:.1f}s[/dim]")
-    console.print(f"  [dim]Summary: generated/DEPLOYMENT_SUMMARY.md[/dim]")
+    console.print(f"  [dim]Summary: {output_dir}/DEPLOYMENT_SUMMARY.md[/dim]")
     console.print()
 
 

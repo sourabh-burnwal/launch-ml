@@ -20,8 +20,8 @@ from typing import Any, Dict, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from core.config_loader import LLMConfig
-from utils.logger import get_logger
+from launchml.core.config_loader import LLMConfig
+from launchml.utils.logger import get_logger
 
 log = get_logger(__name__)
 

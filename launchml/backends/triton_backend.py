@@ -43,9 +43,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from backends.base import BackendCapabilities, DeploymentBackend
-from backends.registry import register_backend
-from utils.logger import get_logger
+from launchml.backends.base import BackendCapabilities, DeploymentBackend
+from launchml.backends.registry import register_backend
+from launchml.utils.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -192,7 +192,7 @@ class TritonBackend(DeploymentBackend):
             if is_local:
                 instructions["logging"] = (
                     "Triton logs stream to stdout (visible via docker compose logs).\n"
-                    "Run: docker compose -f generated/serving_code/docker-compose.yaml logs -f\n"
+                    f"Run: docker compose -f {self.serving_dir}/docker-compose.yaml logs -f\n"
                     "Verbose logging enabled (--log-verbose=1)."
                 )
             else:
@@ -387,8 +387,8 @@ instance_group [
         ``TritonPythonModel`` implementation.  The user's ``predict.py``
         is NOT copied — all logic is embedded in the generated code.
         """
-        from core.config_loader import LLMConfig
-        from core.llm_client import create_llm_or_mock, invoke_llm, extract_code
+        from launchml.core.config_loader import LLMConfig
+        from launchml.core.llm_client import create_llm_or_mock, invoke_llm, extract_code
 
         entrypoint_source = self._read_entrypoint_source()
         if not entrypoint_source:

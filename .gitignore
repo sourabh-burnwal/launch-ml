@@ -35,16 +35,12 @@ ENV/
 .env.local
 .env.*.local
 
-# ─── Generated outputs (keep directory structure, ignore content) ─────────
-generated/terraform/*.tf
-generated/terraform/.terraform/
-generated/terraform/*.tfstate*
-generated/terraform/.terraform.lock.hcl
-generated/serving_code/*
-generated/DEPLOYMENT_SUMMARY.md
-!generated/.gitkeep
-!generated/terraform/.gitkeep
-!generated/serving_code/.gitkeep
+# ─── Generated outputs (user-specified --output-dir) ──────────────────────
+# The default output directory name, if users keep the suggested name.
+output/
+
+# Legacy generated directory (from pre-install era)
+generated/
 
 # ─── OS ───────────────────────────────────────────────────────────────────
 .DS_Store

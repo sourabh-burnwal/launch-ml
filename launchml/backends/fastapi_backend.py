@@ -19,9 +19,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
-from backends.base import BackendCapabilities, DeploymentBackend
-from backends.registry import register_backend
-from utils.logger import get_logger
+from launchml.backends.base import BackendCapabilities, DeploymentBackend
+from launchml.backends.registry import register_backend
+from launchml.utils.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -129,7 +129,7 @@ class FastAPIBackend(DeploymentBackend):
             if is_local:
                 instructions["logging"] = (
                     "Container logs stream to stdout (visible via docker compose logs).\n"
-                    "Run: docker compose -f generated/serving_code/docker-compose.yaml logs -f"
+                    f"Run: docker compose -f {self.serving_dir}/docker-compose.yaml logs -f"
                 )
             else:
                 instructions["logging"] = (

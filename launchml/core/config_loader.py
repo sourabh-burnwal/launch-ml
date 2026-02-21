@@ -20,7 +20,7 @@ from typing import Any, Dict, Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from utils.logger import get_logger, error as cli_error
+from launchml.utils.logger import get_logger, error as cli_error
 
 log = get_logger(__name__)
 
@@ -29,7 +29,10 @@ log = get_logger(__name__)
 
 class ModelConfig(BaseModel):
     """Pointer to the user's local model artefacts."""
-    path: str = Field(..., description="Path to model directory")
+    path: str = Field(
+        default=".",
+        description="Path to model directory (overridden by --model-dir CLI arg)",
+    )
     framework_hint: Optional[str] = Field(
         None,
         description="Optional hint: pytorch | tensorflow | onnx | transformers",
@@ -38,14 +41,6 @@ class ModelConfig(BaseModel):
         None,
         description="Custom predict.py entrypoint filename",
     )
-
-    @field_validator("path")
-    @classmethod
-    def _path_must_exist(cls, v: str) -> str:
-        p = Path(v).expanduser()
-        if not p.exists():
-            raise ValueError(f"Model path does not exist: {p}")
-        return str(p)
 
 
 class SchemaDefinition(BaseModel):
@@ -147,7 +142,7 @@ class LLMConfig(BaseModel):
 
 class DeployConfig(BaseModel):
     """Root configuration object — the single source of truth for a run."""
-    model: ModelConfig
+    model: ModelConfig = Field(default_factory=ModelConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)

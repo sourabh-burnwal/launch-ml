@@ -1,12 +1,14 @@
 # ==============================================================================
-# LaunchML - Deployment Configuration
+# LaunchML - Image Prediction Deployment Configuration
 # ==============================================================================
-# Copy this file and customize for your model deployment.
-# Run: python deploy.py --config deploy_config.yaml
+# Install:  pip install .
+# Run:      launch-ml --model-dir ./model_dir \
+#                      --config deploy_config.yaml \
+#                      --output-dir ./output
 # ==============================================================================
 
 model:
-  path: ./model_dir                # Path to your model directory
+  # model path is provided via --model-dir CLI argument
   framework_hint: pytorch          # optional: pytorch | tensorflow | onnx | transformers
   entrypoint: predict.py           # optional: custom inference entrypoint
 
@@ -33,10 +35,10 @@ deployment:
   backend: auto                      # auto | fastapi | triton | seldon | vertex_ai (auto = AI decides)
   cloud: local                       # gcp | aws | local (local = containerize & run via Docker)
   region: us-central1
-  latency_target_ms: 200
-  expected_rps: 50
-  load_balancer: public            # public | private
-  gpu_required: false               # auto | true | false
+  latency_target_ms: 300
+  expected_rps: 20
+  load_balancer: public
+  gpu_required: false
 
 observability:
   enable_metrics: true

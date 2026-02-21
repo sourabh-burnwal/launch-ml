@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from utils.logger import get_logger, console
+from launchml.utils.logger import get_logger, console
 
 log = get_logger(__name__)
 
