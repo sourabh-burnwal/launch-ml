@@ -1,0 +1,41 @@
+# ==============================================================================
+# LaunchML - Deployment Configuration
+# ==============================================================================
+# Install:  pip install .
+# Run:      launch-ml --model-dir ./model_dir \
+#                      --config deploy_config.yaml \
+#                      --output-dir ./output
+# ==============================================================================
+
+model:
+  # model path is provided via --model-dir CLI argument
+  framework_hint: pytorch          # optional: pytorch | tensorflow | onnx | transformers
+  entrypoint: predict.py           # optional: custom inference entrypoint
+
+api:
+  request_schema:
+    type: object
+    properties:
+      text:
+        type: string
+  response_schema:
+    type: object
+    properties:
+      prediction:
+        type: string
+
+deployment:
+  cloud: gcp                       # gcp | aws | local (local = containerize & run via Docker)
+  region: us-central1
+  latency_target_ms: 200
+  expected_rps: 50
+  load_balancer: public            # public | private
+  gpu_required: auto               # auto | true | false
+
+observability:
+  enable_metrics: true
+  enable_logging: true
+
+llm:
+  provider: openai                 # openai | anthropic | gemini
+  model: gpt-4o

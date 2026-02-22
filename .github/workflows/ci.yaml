@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Check syntax (compile all modules)
+        run: |
+          python -m py_compile launchml/cli.py
+          python -m py_compile launchml/core/config_loader.py
+          python -m py_compile launchml/core/model_analyzer.py
+          python -m py_compile launchml/core/llm_client.py
+          python -m py_compile launchml/core/agent_graph.py
+          python -m py_compile launchml/backends/base.py
+          python -m py_compile launchml/backends/registry.py
+          python -m py_compile launchml/backends/fastapi_backend.py
+          python -m py_compile launchml/backends/triton_backend.py
+          python -m py_compile launchml/backends/seldon_backend.py
+          python -m py_compile launchml/backends/vertex_ai_backend.py
+          python -m py_compile launchml/utils/logger.py
+          python -m py_compile launchml/utils/terraform_runner.py
+
+      - name: Verify CLI entry point
+        run: |
+          launch-ml --help

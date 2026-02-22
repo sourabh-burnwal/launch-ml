@@ -1,0 +1,49 @@
+# ==============================================================================
+# LaunchML - Deployment Configuration
+# ==============================================================================
+# Copy this file and customize for your model deployment.
+# Run: python deploy.py --config deploy_config.yaml
+# ==============================================================================
+
+model:
+  path: ./model_dir                # Path to your model directory
+  framework_hint: pytorch          # optional: pytorch | tensorflow | onnx | transformers
+  entrypoint: predict.py           # optional: custom inference entrypoint
+
+api:
+  request_schema:
+    type: object
+    properties:
+      text:
+        type: string
+  response_schema:
+    type: object
+    properties:
+      text:
+        type: string
+      predictions:
+        type: array
+        items:
+          type: object
+          properties:
+            label:
+              type: string
+            confidence:
+              type: number
+
+deployment:
+  backend: triton                      # auto | fastapi | triton | seldon | vertex_ai (auto = AI decides)
+  cloud: local                       # gcp | aws | local (local = containerize & run via Docker)
+  region: us-central1
+  latency_target_ms: 200
+  expected_rps: 50
+  load_balancer: public            # public | private
+  gpu_required: false               # auto | true | false
+
+observability:
+  enable_metrics: true
+  enable_logging: true
+
+llm:
+  provider: gemini                 # openai | anthropic | gemini
+  model: gemini-2.5-flash

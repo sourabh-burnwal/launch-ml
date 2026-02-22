@@ -1,0 +1,27 @@
+{# Seldon SeldonDeployment template #}
+apiVersion: machinelearning.seldon.io/v1
+kind: SeldonDeployment
+metadata:
+  name: {{ model_name }}
+  namespace: {{ namespace | default("default") }}
+spec:
+  predictors:
+    - name: default
+      replicas: {{ replicas }}
+      graph:
+        name: model
+        implementation: {{ implementation | default("SKLEARN_SERVER") }}
+        modelUri: "{{ model_uri }}"
+      componentSpecs:
+        - spec:
+            containers:
+              - name: model
+                image: "{{ container_image }}"
+                resources:
+                  requests:
+                    cpu: "{{ cpu_request | default('1') }}"
+                    memory: "{{ memory_request | default('2Gi') }}"
+                  limits:
+                    cpu: "{{ cpu_limit | default('2') }}"
+                    memory: "{{ memory_limit | default('4Gi') }}"
+      traffic: 100
